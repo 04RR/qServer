@@ -35,9 +35,13 @@ MTP="${MTP:-on}"                    # on|off
 SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 [ "$MTP" = "off" ] && SPEC_ARGS=(--spec-type none)
 
-# NOTE: NO CUDA_VISIBLE_DEVICES pin here — this entry deliberately needs BOTH GPUs. -sm layer + -ts
-# distributes whole layers across them; -mg 0 keeps output/KV-for-final on the 4090.
-exec "$BIN" \
+# PIN TO BOTH GPUs explicitly (=0,1). This entry needs GPU0+GPU1: -sm layer + -ts distributes whole
+# layers across them, -mg 0 keeps output/KV-for-final on the 4090. Each of the four sibling scripts
+# owns its own pin (=0 / =1 / =0,1) precisely so qwen-swap.service can stay pin-agnostic (see its
+# comment). Leaving this one unset made it depend on an empty INHERITED env — and a future
+# Environment=CUDA_VISIBLE_DEVICES= added to the unit would silently starve it to one GPU (OOM/fail).
+# =0,1 is robust and self-documenting.
+exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
   -m "$MODEL" \
   --alias qwen36-q6 \
   -ngl "$NGL" -c "$CTX" -fa on -np 1 \

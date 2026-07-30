@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-# Dual-GPU soak: agent-style text loop (GPU0) + heavy vision loop (GPU1), concurrent.
-# Samples RSS + per-GPU VRAM every 30s. Flags monotonic climb, GPU1 device exceptions,
-# and prefix-cache regression. Env: SOAK_SEC (default 3000), TEXT/VISION/ROUTER URLs.
-import os, sys, json, time, base64, threading, subprocess, urllib.request, statistics
+# Text soak: agent-style multi-turn loop against ONE loaded model. Samples RSS + BOTH GPUs' VRAM
+# every 30s and flags monotonic climb (a leak) or prefix-cache regression.
+#
+# VISION HALF REMOVED: vision was retired with the llama-swap re-architecture, and port 8081 is now
+# the Q6 27B (a TEXT server). The old vision_loop POSTed image payloads to 8081 — which, post-ship,
+# meant a text-only model would *answer* image prompts rather than refuse: a quietly wrong test, not
+# a crash. Deleted rather than left dangling (same call regress.sh made). For long-context / MoE soak
+# see soak35.py; this one is the general single-model text soak.
+#
+# Env: SOAK_SEC (default 3000). TEXT = backend of the model under test (8080=27b-Q4, 8081=27b-Q6,
+# 8082=35b, 8084=122b), or point at the router :8000 and set MODEL to a valid id. MODEL defaults to
+# "x" (ignored when hitting a backend directly).
+import os, sys, json, time, threading, subprocess, urllib.request, statistics
 
-TEXT   = os.environ.get("TEXT",   "http://127.0.0.1:8080")
-VISION = os.environ.get("VISION", "http://127.0.0.1:8081")
-ROUTER = os.environ.get("ROUTER", "http://127.0.0.1:8000")
+TEXT   = os.environ.get("TEXT",  "http://127.0.0.1:8080")
+MODEL  = os.environ.get("MODEL", "x")   # ignored by a direct backend; set a real id if TEXT is the router
 DUR    = int(os.environ.get("SOAK_SEC", "3000"))
-IMG    = os.path.expanduser("~/ai/qwen36/models/test-image.png")
-CSV    = os.environ.get("SOAK_CSV", "/tmp/claude-1000/-mnt-d-LMServer/284c36d2-a897-4f4c-9c73-764205ad0495/scratchpad/soak.csv")
+CSV    = os.environ.get("SOAK_CSV", "/tmp/qwen_soak.csv")
 
 stop=False
-counters={"text_turns":0,"text_err":0,"vis_gens":0,"vis_err":0,"gpu1_exceptions":0}
+counters={"text_turns":0,"text_err":0}
 lock=threading.Lock()
 
 def post(base, path, obj, timeout=180):
@@ -23,17 +30,17 @@ def post(base, path, obj, timeout=180):
 TOOLS=[{"type":"function","function":{"name":"run","description":"run a shell command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}}]
 
 def text_loop():
-    # simulate an agent: multi-turn, growing context, periodic tool calls; reset session when large
+    # simulate an agent: multi-turn, growing context, periodic tool calls; reset session each cycle
     while not stop:
         msgs=[{"role":"system","content":"You are Qwen, created by Alibaba Cloud. You are a helpful assistant."}]
         for turn in range(12):
             if stop: break
             if turn%3==1:
                 msgs.append({"role":"user","content":f"Call the run tool to list files in /var/log (turn {turn})."})
-                body={"model":"x","messages":msgs,"tools":TOOLS,"max_tokens":300,"temperature":0.4,"stream":False}
+                body={"model":MODEL,"messages":msgs,"tools":TOOLS,"max_tokens":2048,"temperature":0.4,"stream":False}
             else:
                 msgs.append({"role":"user","content":f"Step {turn}: write a short Python helper and explain it in 2 lines."})
-                body={"model":"x","messages":msgs,"max_tokens":400,"temperature":0.6,"stream":False}
+                body={"model":MODEL,"messages":msgs,"max_tokens":2048,"temperature":0.6,"stream":False}
             try:
                 d=post(TEXT,"/v1/chat/completions",body)
                 m=d["choices"][0]["message"]
@@ -42,37 +49,11 @@ def text_loop():
                     msgs.append({"role":"assistant","content":m.get("content") or "","tool_calls":m["tool_calls"]})
                     msgs.append({"role":"tool","tool_call_id":m["tool_calls"][0]["id"],"content":"file1.log\nfile2.log\nsyslog"})
                 else:
-                    msgs.append({"role":"assistant","content":m.get("content") or "(thinking)"})
+                    msgs.append({"role":"assistant","content":m.get("content") or m.get("reasoning_content") or "(thinking)"})
                 with lock: counters["text_turns"]+=1
-            except Exception as e:
+            except Exception:
                 with lock: counters["text_err"]+=1
                 time.sleep(1)
-
-def vision_loop():
-    b64=base64.b64encode(open(IMG,"rb").read()).decode()
-    url=f"data:image/png;base64,{b64}"
-    prompts=["Read the invoice number.","What is the amount due?","Read the fine print code.","List all text you see."]
-    i=0
-    while not stop:
-        body={"model":"x","stream":False,"max_tokens":80,"temperature":0.4,
-              "messages":[{"role":"user","content":[{"type":"text","text":prompts[i%len(prompts)]},
-                           {"type":"image_url","image_url":{"url":url}}]}]}
-        i+=1
-        try:
-            post(VISION,"/v1/chat/completions",body,timeout=120)
-            with lock: counters["vis_gens"]+=1
-        except urllib.error.HTTPError as e:
-            with lock: counters["vis_err"]+=1
-        except Exception as e:
-            # connection refused/reset => server may have crashed (possible #24399)
-            with lock:
-                counters["vis_err"]+=1
-                # check if Server B is dead
-                try:
-                    urllib.request.urlopen(VISION+"/health",timeout=3)
-                except Exception:
-                    counters["gpu1_exceptions"]+=1
-            time.sleep(2)
 
 def vram(i):
     try:
@@ -96,36 +77,36 @@ def prefix_probe():
 
 def main():
     global stop
-    t=[threading.Thread(target=text_loop,daemon=True),threading.Thread(target=vision_loop,daemon=True)]
-    for x in t: x.start()
+    threading.Thread(target=text_loop,daemon=True).start()
     start=time.time(); rows=[]
-    with open(CSV,"w") as f: f.write("t,rss_kb,vram0,vram1,text_turns,vis_gens,text_err,vis_err,gpu1_exc,prefix_ms\n")
+    with open(CSV,"w") as f: f.write("t,rss_kb,vram0,vram1,text_turns,text_err,prefix_ms\n")
     while time.time()-start < DUR:
         time.sleep(30)
         el=int(time.time()-start)
         pm = prefix_probe() if (el//30)%4==0 else -1   # probe cache every ~2 min
         with lock: c=dict(counters)
         r0,r1,rr=vram(0),vram(1),rss_total()
-        row=(el,rr,r0,r1,c["text_turns"],c["vis_gens"],c["text_err"],c["vis_err"],c["gpu1_exceptions"],pm)
+        row=(el,rr,r0,r1,c["text_turns"],c["text_err"],pm)
         rows.append(row)
         with open(CSV,"a") as f: f.write(",".join(map(str,row))+"\n")
-        print(f"[{el:4}s] rss={rr//1024}MiB vram0={r0} vram1={r1} | text={c['text_turns']} vis={c['vis_gens']} err(t/v)={c['text_err']}/{c['vis_err']} gpu1_exc={c['gpu1_exceptions']} prefix_ms={pm}", flush=True)
+        print(f"[{el:4}s] rss={rr//1024}MiB vram0={r0} vram1={r1} | turns={c['text_turns']} err={c['text_err']} prefix_ms={pm}", flush=True)
     stop=True; time.sleep(3)
-    # analysis
+    # analysis: last-quartile minus first-quartile mean of each series (mmap'd tiers oscillate, so a
+    # quartile regression is the honest leak signal, not an endpoint delta)
     def climb(idx):
         v=[r[idx] for r in rows if r[idx]>=0]
         if len(v)<6: return 0
         q=len(v)//4
         return statistics.mean(v[-q:])-statistics.mean(v[:q])
     print("\n==== SOAK SUMMARY ====")
-    print(f"duration {int(time.time()-start)}s  text_turns={counters['text_turns']}  vis_gens={counters['vis_gens']}")
-    print(f"errors: text={counters['text_err']} vision={counters['vis_err']}  GPU1 device exceptions={counters['gpu1_exceptions']}")
+    print(f"duration {int(time.time()-start)}s  text_turns={counters['text_turns']}  errors={counters['text_err']}")
     rssc=climb(1)//1024; v0c=climb(2); v1c=climb(3)
-    pref=[r[9] for r in rows if r[9]>0]
+    pref=[r[6] for r in rows if r[6]>0]
     print(f"RSS climb (last-first quartile mean): {rssc} MiB")
     print(f"VRAM0 climb: {v0c} MiB   VRAM1 climb: {v1c} MiB")
     if pref: print(f"prefix reprefill ms: first={pref[0]} last={pref[-1]} (max {max(pref)})")
-    ok = (abs(rssc)<2048) and (v0c<400) and (v1c<400) and counters['gpu1_exceptions']==0 and counters['vis_gens']>300
-    print("VERDICT:", "PASS" if ok else "REVIEW", "(no monotonic climb, no GPU1 exception, >300 vision gens)" if ok else "(see numbers above)")
+    ok = (abs(rssc)<2048) and (v0c<400) and (v1c<400) and counters['text_turns']>50 and counters['text_err']==0
+    print("VERDICT:", "PASS" if ok else "REVIEW",
+          "(no monotonic climb, clean turns)" if ok else "(see numbers above)")
 
 if __name__=="__main__": main()

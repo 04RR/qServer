@@ -44,10 +44,12 @@ if [ "$up" = 1 ]; then curl -sf -m5 http://127.0.0.1:8000/healthz; echo
 else echo "  !! :8000 not answering after 30s"; fail=1; fi
 
 echo; echo "== models registered =="
-ids=$(curl -sf -m5 http://127.0.0.1:8000/v1/models | jq -r '[.data[].id]|join(",")' 2>/dev/null)
-echo "  $ids"
-for m in qwen-27b qwen-35b qwen-122b; do
-  echo "$ids" | grep -q "$m" || { echo "  !! missing model: $m"; fail=1; }
+ids=$(curl -sf -m5 http://127.0.0.1:8000/v1/models | jq -r '.data[].id' 2>/dev/null)   # one id per line
+echo "  $(echo "$ids" | paste -sd, -)"
+# grep -qx (whole-line exact), NOT -q (substring): 'qwen-27b' is a substring of 'qwen-27b-q6', so -q
+# would report the Q6 present even if only the Q4 were registered. Match exact ids, newline-separated.
+for m in qwen-27b qwen-27b-q6 qwen-35b qwen-122b; do
+  echo "$ids" | grep -qx "$m" || { echo "  !! missing model: $m"; fail=1; }
 done
 
 echo; echo "== end-to-end: 27B (via legacy alias 'qwen36') =="
