@@ -3,9 +3,12 @@
 #
 # Runs entirely against the router (:8000) -> llama-swap -> qwen-27b (via the legacy alias "qwen36").
 # REWRITTEN for the llama-swap architecture. The old version hardcoded TEXT=:8080 and VISION=:8081
-# as ALWAYS-RESIDENT backends. Under llama-swap, :8080 exists only while the 27B is LOADED, and
-# :8081 NEVER exists (vision retired). Tests [1] and [11] therefore failed for architectural
-# reasons rather than model reasons -- and this suite silently stopped guarding the 27B at all.
+# as ALWAYS-RESIDENT backends. Under llama-swap, backend ports are LOAD-ON-DEMAND: :8080 exists only
+# while the 27B-Q4 is loaded, and :8081 only while the 27B-Q6 is loaded. NB :8081 was vision's before
+# vision was retired -- it is NOT permanently dead, and assuming so is a live hazard: soak.py held
+# exactly this "8081 == vision" belief and quietly POSTed image payloads to the Q6 TEXT server (fixed).
+# Tests [1] and [11] originally failed for architectural reasons rather than model reasons -- and this
+# suite silently stopped guarding the 27B at all.
 #   - vision test [11] and the image half of [12] are DELETED (vision retired, not broken)
 #   - [0] is NEW: asserts every registered model HAS a live gate -- the assertion whose absence
 #     let this suite rot unnoticed through two re-architectures.

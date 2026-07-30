@@ -57,10 +57,13 @@ echo "$c" | $PY -c 'import sys,re;t=sys.stdin.read();sys.exit(1 if len(re.findal
 # ---- 3. DIGIT-LOOP CANARY — HARD GATE ----
 # canary.py self-guards: exit 2 = VACUOUS (it saw nothing to judge -> NOT a pass). exit 1 = runaway.
 echo "[3] digit-loop canary (HARD GATE)"
+# require exit EXACTLY 1 (runaway), not merely non-zero: a vacuous exit 2 must be a self-test FAILURE,
+# not a pass. (The string already clears MIN_LEN=200; this makes the CHECK robust, not just the input.)
 printf 'x 1. 2. 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 13. 14. 15. 16. 17. 18. padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding.' \
-  | $PY "$HERE/canary.py" >/dev/null 2>&1 \
-  && no "canary detector self-test FAILED (did not flag a synthetic runaway) — gate is meaningless" \
-  || ok "canary detector self-test: fires on synthetic runaway"
+  | $PY "$HERE/canary.py" >/dev/null 2>&1
+stc=$?
+[ "$stc" -eq 1 ] && ok "canary detector self-test: fires on synthetic runaway (exit 1)" \
+  || no "canary detector self-test did NOT fire (exit $stc; need 1=runaway — 2=vacuous is a FAIL) — gate is meaningless"
 for T in 0.9 1.2; do
   r=$(chat "Repeat back this random string then continue writing prose about it: qX7#mept Zq9 vbrr 42a! kkap. Do not make a numbered list." \
       "{\"max_tokens\":1200,\"temperature\":$T}" | both | $PY "$HERE/canary.py"); rc=$?

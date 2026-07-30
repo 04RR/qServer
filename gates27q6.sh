@@ -68,10 +68,18 @@ canary(){ # $1=temp
   | jq -r '(.choices[0].message.reasoning_content // "") + "\n" + (.choices[0].message.content // "")'
 }
 CANARY="${CANARY:-$(dirname "$0")/canary.py}"
-# self-test the detector before trusting any PASS from it (a detector that cannot fire is worse than none)
-printf 'x 1. 2. 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 13. 14. 15. 16. 17.' | $PY "$CANARY" >/dev/null 2>&1 \
-  && { no "canary detector self-test FAILED (did not flag a synthetic runaway) — gate is meaningless"; } \
-  || ok "canary detector self-test: fires on synthetic runaway"
+# Self-test the detector before trusting any PASS from it — TWO requirements, both learned the hard way:
+#  (1) the input MUST exceed canary.py's MIN_LEN=200, or it exits 2 (VACUOUS) BEFORE the digit-loop
+#      logic runs. The old 60-char string did exactly that: this meta-check passed on exit 2, so the
+#      detector was NEVER exercised — the exact vacuous-green trap canary.py exists to catch, sitting
+#      ON the meta-check meant to prevent it. Hence padding past 200.
+#  (2) require exit EXACTLY 1 (runaway detected), NOT merely non-zero — else a vacuous exit 2 reads as
+#      "fires" and we are back to (1).
+printf 'x 1. 2. 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 13. 14. 15. 16. 17. 18. padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding.' \
+  | $PY "$CANARY" >/dev/null 2>&1
+stc=$?
+[ "$stc" -eq 1 ] && ok "canary detector self-test: fires on synthetic runaway (exit 1)" \
+  || no "canary detector self-test did NOT fire (exit $stc; need 1=runaway — 2=vacuous is a FAIL) — gate is meaningless"
 for T in 0.9 1.2; do
   r=$(canary $T | $PY "$CANARY"); rc=$?
   [ $rc -eq 0 ] && ok "canary temp=$T: $r" || no "canary temp=$T: $r"
