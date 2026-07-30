@@ -1,0 +1,19 @@
+[Unit]
+Description=Qwen3.6-27B Server A (text + MTP, RTX 4090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rohit
+# GPU pinning is also set in the run script (exec env CUDA_VISIBLE_DEVICES=0); duplicated here
+# as belt-and-suspenders because systemd does NOT inherit the interactive shell environment.
+Environment=CUDA_VISIBLE_DEVICES=0
+ExecStart=/home/rohit/ai/qwen36/run-text-mtp.sh
+Restart=on-failure
+RestartSec=5
+# do not pin weights in RAM (both servers mmap their GGUFs)
+LimitMEMLOCK=0
+
+[Install]
+WantedBy=multi-user.target

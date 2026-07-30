@@ -1,0 +1,17 @@
+[Unit]
+Description=Qwen3.6-27B Server B (vision, RTX 5060 Ti)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rohit
+# Explicit GPU pinning (systemd does not inherit the shell env); also set in run-vision.sh.
+Environment=CUDA_VISIBLE_DEVICES=1
+ExecStart=/home/rohit/ai/qwen36/run-vision.sh
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=0
+
+[Install]
+WantedBy=multi-user.target

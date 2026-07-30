@@ -1,0 +1,29 @@
+[Unit]
+Description=llama-swap (:9000) - model manager for qwen-27b / qwen-35b (mutually exclusive)
+After=network-online.target
+Wants=network-online.target
+# Conflicts: llama-swap OWNS the llama-server processes now. qwen-text.service must stay disabled
+# or it will grab port 8080 + GPU0 at boot and llama-swap's qwen-27b will fail to bind.
+Conflicts=qwen-text.service qwen-vision.service
+
+[Service]
+Type=simple
+User=rohit
+# NOTE: deliberately NO Environment=CUDA_VISIBLE_DEVICES here, unlike the old per-server units.
+# Pinning is now PER-MODEL, not per-unit: qwen-27b needs GPU0 only, qwen-35b needs GPU0+GPU1.
+# The run scripts own it (`exec env CUDA_VISIBLE_DEVICES=0` / `=0,1`). Setting it here would be
+# a single value applied to both models - wrong for at least one of them.
+Environment=PATH=/home/rohit/.local/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64
+ExecStart=/home/rohit/.local/bin/llama-swap -config /home/rohit/ai/qwen36/swap/config.yaml -listen 127.0.0.1:9000
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=0
+# KillMode=control-group (the default, stated explicitly because it is load-bearing): stopping
+# llama-swap MUST also kill the llama-server it spawned. An orphaned llama-server would keep
+# holding 21 GB of VRAM and block the next load - the stale-process conflict, all over again.
+KillMode=control-group
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

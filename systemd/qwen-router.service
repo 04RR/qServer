@@ -1,0 +1,20 @@
+[Unit]
+Description=Qwen3.6 router (:8000 -> llama-swap :9000 -> qwen-27b | qwen-35b)
+After=qwen-swap.service network-online.target
+Wants=qwen-swap.service
+
+[Service]
+Type=simple
+User=rohit
+# READINESS GATE -- rewritten for llama-swap. The OLD gate waited for :8080/health AND
+# :8081/health (both backends always resident). Under llama-swap that is WRONG and would hang:
+# models are load-on-demand (ttl:0), so NO model is loaded at boot and those ports are not
+# listening. The gate would burn its full 240s, fail, and flap forever.
+# Correct readiness = llama-swap itself answering, NOT any model being loaded.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do curl -sf -m2 http://127.0.0.1:9000/v1/models >/dev/null && exit 0; sleep 2; done; echo "llama-swap not ready after 120s"; exit 1'
+ExecStart=/home/rohit/ai/qwen36/router/run-router.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

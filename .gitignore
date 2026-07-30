@@ -1,0 +1,15 @@
+# ── model weights — NEVER push (125 GB) ────────────────────────────
+models/
+*.gguf
+
+# ── upstream llama.cpp clone + CUDA build (~1 GB, has its own .git) ──
+llama.cpp/
+
+# ── python venvs / caches ──────────────────────────────────────────
+router/.venv/
+.venv/
+**/__pycache__/
+*.pyc
+
+# ── runtime logs / scratch ─────────────────────────────────────────
+*.log
