@@ -1,18 +1,20 @@
-# llama-swap v240 config — two MUTUALLY EXCLUSIVE text models on one pair of GPUs.
+# llama-swap v240 config — three MUTUALLY EXCLUSIVE models on one pair of GPUs
+# (one dense+vision 27B, two MoE). One loads at a time; the others are evicted.
 #
 # SCHEMA NOTE (verified against config.example.yaml @ tag v240, not from memory):
 #   `groups` is NOT top-level any more — it moved under routing.router.settings.groups,
 #   and there are now two swap engines (group | matrix). Re-verify on any llama-swap upgrade.
 #
-# WHY ONE GROUP CONTAINING BOTH: swap:true means only one member runs at a time; exclusive:true
-# means loading a member unloads every other group. Both models in ONE swap:true group is the
-# hard mutual-exclusion requirement — the 27B owns GPU0 alone, the 35B needs GPU0 *and* GPU1,
-# so they can never coexist. They must NEVER be in a swap:false (concurrent) group.
+# WHY ONE GROUP CONTAINING ALL: swap:true means only one member runs at a time; exclusive:true
+# means loading a member unloads every other group. Every model in ONE swap:true group is the
+# hard mutual-exclusion requirement — the 27B (Q6, dual-GPU) needs GPU0+GPU1, the 35B needs
+# GPU0+GPU1, the 122B needs GPU0+GPU1+~15 GiB RAM. No two can coexist, so they must NEVER be in
+# a swap:false (concurrent) group.
 #
-# WHY cmd POINTS AT THE RUN SCRIPTS: those scripts encode every hard-won flag (min-spill -ot,
-# q8_0 KV, v19 template, MTP). Duplicating them here would let the two drift apart. The scripts
-# `exec` the binary, so the PID llama-swap tracks IS llama-server — SIGTERM reaches the real
-# process instead of killing a wrapper and orphaning the server holding 21 GB of VRAM.
+# WHY cmd POINTS AT THE RUN SCRIPTS: those scripts encode every hard-won flag (layer split, q8_0
+# KV, mmproj, MTP). Duplicating them here would let the two drift apart. The scripts `exec` the
+# binary, so the PID llama-swap tracks IS llama-server — SIGTERM reaches the real process instead
+# of killing a wrapper and orphaning the server holding 20+ GB of VRAM.
 
 # 900s: the 122B is 48 GiB across VRAM+RAM. Warm (page cache) it boots in ~90s; COLD off disk it
 # is far slower. 300 would time out a cold 122B load and look like a failure.
@@ -23,34 +25,26 @@ unloadTimeout: 30           # graceful SIGTERM window before force-kill (the 122
                             # ~15 GiB RAM slice to release, not just VRAM)
 
 models:
-  "qwen-27b":
-    name: "Qwen3.6-27B dense (4090 only)"
-    description: "Dense 27B, MTP n=4, 131072 ctx, q8_0 KV. GPU1 idle while loaded."
-    cmd: /home/rohit/ai/qwen36/run-text-mtp.sh
-    proxy: http://127.0.0.1:8080      # script hardcodes --port 8080, so proxy MUST be explicit
+  # PRIMARY DENSE + NATIVE VISION. Qwen3.8-27B (qwen3_5 arch — SAME family as the 35B/122B, weights
+  # differ). Replaces the ENTIRE 3.6-27B dense line (old Q4 fast + Q6 quality entries) with ONE
+  # multimodal server: Q6_K weights (22.9 GiB) span BOTH GPUs via --split-mode layer + --tensor-split
+  # (in run-38-27b.sh), mmproj-F16 loaded for image/video, MTP embedded and verified to coexist with
+  # vision (gates38.sh: 17/0). Mutually exclusive with the 35B/122B automatically via the single
+  # swap:true "gpu-exclusive" group. Legacy aliases (qwen36 / qwen36-q6 / qwen36-text) are CARRIED
+  # onto it so existing clients keep working — they now land on 3.8, which supersedes the retired 3.6.
+  "qwen-38-27b":
+    name: "Qwen3.8-27B dense + vision (4090 + 5060 Ti)"
+    description: "Dense qwen3_5 27B Q6_K, native VLM (mmproj-F16), --split-mode layer -ts 3,1 across both GPUs, MTP n=4, 131072 ctx, q8_0 KV."
+    cmd: /home/rohit/ai/qwen36/run-38-27b.sh
+    proxy: http://127.0.0.1:8080      # script defaults --port 8080 (the primary-dense slot)
     checkEndpoint: /health
     ttl: 0                            # never auto-unload; swap only on explicit demand
-    # "qwen36" is what the shipped stack's clients and regress.sh already send. It maps to the
-    # 27B so existing traffic keeps hitting the model it has always hit — the 35B is opt-in by
-    # name. Silently repointing "qwen36" at the 35B would change behaviour under working clients.
     aliases:
-      - "qwen36"
+      - "qwen38"
+      - "qwen38-27b"
+      - "qwen36"                       # legacy: existing clients / regress.sh send this -> now 3.8
+      - "qwen36-q6"                    # legacy Q6 alias -> now 3.8 (Q6_K)
       - "qwen36-text"
-
-  # QUALITY-FIRST 27B, ADDED ALONGSIDE qwen-27b (does NOT replace it). Q6_K_XL (24.2 GiB weights)
-  # cannot fit the 4090 alone, so it spans BOTH GPUs via --split-mode layer + --tensor-split (in the
-  # run script). It therefore claims GPU0+GPU1 and is mutually exclusive with every other member --
-  # guaranteed automatically by living in the single swap:true "gpu-exclusive" group below, no new
-  # mechanism. The Q4 entry (qwen-27b) stays live as the fast/fallback option.
-  "qwen-27b-q6":
-    name: "Qwen3.6-27B dense Q6_K_XL (4090 + 5060 Ti, quality-first)"
-    description: "Dense 27B UD-Q6_K_XL, --split-mode layer -ts 3,1 across both GPUs, MTP n=4, 131072 ctx, q8_0 KV."
-    cmd: /home/rohit/ai/qwen36/run-text-27b-q6.sh
-    proxy: http://127.0.0.1:8081      # script hardcodes --port 8081 (free since vision retired)
-    checkEndpoint: /health
-    ttl: 0
-    aliases:
-      - "qwen36-q6"
 
   "qwen-35b":
     name: "Qwen3.6-35B-A3B MoE (4090 + 5060 Ti)"
@@ -84,11 +78,10 @@ routing:
         "gpu-exclusive":
           swap: true        # only one member runs at a time  <-- the correctness requirement
           exclusive: true   # loading a member unloads every other group
-          # ALL THREE are mutually exclusive. The 27B needs GPU0 alone; the 35B needs GPU0+GPU1;
+          # ALL THREE are mutually exclusive. The 27B (Q6) spans GPU0+GPU1; the 35B needs GPU0+GPU1;
           # the 122B needs GPU0+GPU1+~15 GiB RAM. No two can coexist, so they must never be split
           # into a swap:false (concurrent) group.
           members:
-            - qwen-27b
-            - qwen-27b-q6
+            - qwen-38-27b
             - qwen-35b
             - qwen-122b

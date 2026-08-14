@@ -5,16 +5,24 @@ No "start the server" step — **naming a model in a request loads it**; naming 
 
 | model id | what | speed | aliases |
 |---|---|---|---|
-| `qwen-27b` | 27B dense **Q4**, 4090 only | 101–118 t/s ← the fast dense | `qwen36`, `qwen36-text` |
-| `qwen-27b-q6` | 27B dense **Q6_K_XL**, 4090+5060Ti | ~64 t/s code / ~37 creative ← **quality-first dense** | `qwen36-q6` |
+| `qwen-38-27b` | **27B dense + VISION** (Qwen3.8) Q6_K, 4090+5060Ti | ~73 t/s code · 48 t/s @100K ← quality dense, **sees images/video** | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` |
 | `qwen-35b` | 35B MoE, 4090+5060Ti | **206 t/s** ← the fast one | `qwen36-35b` |
 | `qwen-122b` | 122B MoE, 4090+5060Ti+RAM | 37–40 t/s ← the smart one | `qwen35-122b` |
 
-`qwen-27b-q6` is the **same 27B, higher quant** (Q6 vs Q4) — spans both GPUs, so it costs ~45% of the
-Q4's speed (55% retained) for the quality bump. Reach for it when a 27B answer needs to be *right*,
-not fast; stay on `qwen-27b` for iteration speed. Both are mutually exclusive with everything else.
+`qwen-38-27b` **replaced the entire 3.6-27B dense line** (the old Q4 fast + Q6 quality entries) with one
+Qwen3.8-27B multimodal server: Q6_K weights span both GPUs (layer split), MTP drafting works *and* it
+reads images/video (native VLM). All the legacy aliases (`qwen36`, `qwen36-q6`, `qwen36-text`) now land
+on it, so existing clients keep working. It is mutually exclusive with the 35B/122B.
 
-**Swap cost:** 27B-Q4 ~11–15 s · 27B-Q6 ~15–20 s · 35B ~16–25 s · 122B **~40–50 s** (48 GiB across three tiers).
+**Vision:** send an image with the OpenAI `image_url` content part (data-URI or http URL):
+```bash
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"qwen38",
+  "messages":[{"role":"user","content":[{"type":"text","text":"What is in this image?"},
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,'"$(base64 -w0 pic.png)"'"}}]}],
+  "max_tokens":2048}' | jq -r '.choices[0].message.content'
+```
+
+**Swap cost:** 27B (3.8) ~15–20 s · 35B ~16–25 s · 122B **~40–50 s** (48 GiB across three tiers).
 Warm (page cache) is faster than cold. **First request after any load is ~15% slow** (graph warmup) —
 not a regression.
 
@@ -27,10 +35,7 @@ not a regression.
 curl -s localhost:8000/healthz | jq
 
 # talk to a model (loads/swaps automatically)
-curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model":"qwen-35b",
-  "messages":[{"role":"user","content":"hello"}],
-  "max_tokens":2048}' | jq -r '.choices[0].message.content'
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"qwen38", "messages":[{"role":"user","content":"hello"}], "max_tokens":2048}' | jq -r '.choices[0].message.content'
 
 # free both GPUs (nothing resident)
 curl -s -X POST localhost:9000/api/models/unload
@@ -95,7 +100,7 @@ curl -sN localhost:9000/logs/stream
 sudo systemctl restart qwen-swap qwen-router
 
 # reach the loaded model directly, bypassing the router
-curl -s localhost:9000/upstream/qwen-27b/health
+curl -s localhost:9000/upstream/qwen-38-27b/health
 ```
 
 **Normal things that look wrong:**
@@ -110,13 +115,13 @@ curl -s localhost:9000/upstream/qwen-27b/health
 ```bash
 export PATH=$HOME/.local/bin:$PATH        # jq
 
-# 27B — via the router, 17 tests (canary, tool-in-think, prefix cache, 100K)
+# 27B (Qwen3.8) — via the router: alias dispatch, tool-budget guard, 100K
 ~/ai/qwen36/regress.sh
 
-# 27B-Q6 / 35B / 122B — these hit a STANDALONE server, so free the GPUs first:
+# 27B (3.8) / 35B / 122B — these hit a STANDALONE server, so free the GPUs first:
 curl -s -X POST localhost:9000/api/models/unload
-~/ai/qwen36/run-text-27b-q6.sh &         # port 8081 (both GPUs)
-~/ai/qwen36/gates27q6.sh ; kill %1       # 16 checks: dual-GPU residency, canary, MTP-across-split, 100K
+~/ai/qwen36/run-38-27b.sh &              # port 8080 (both GPUs, +vision)
+~/ai/qwen36/gates38.sh ; kill %1         # 17 checks: dual-GPU residency, canary, MTP+mmproj, VISION, 100K
 
 curl -s -X POST localhost:9000/api/models/unload
 ~/ai/qwen36/run-text-35b.sh &            # port 8082
@@ -135,7 +140,8 @@ curl -s -X POST localhost:9000/api/models/unload
 
 | knob | default | when to change |
 |---|---|---|
-| `TS` (27B-Q6) | 3,1 | tensor-split proportion GPU0,GPU1. 3,1 is speed-optimal + ≥1 GiB free each. If GPU0 ever OOMs, shift MORE to GPU1 (`2,1`) — never toward GPU0 (it's the binding card). |
+| `TS` (27B/3.8) | 3,1 | tensor-split proportion GPU0,GPU1. Measured optimal: GPU0 free ~2.7G / GPU1 free ~6.9G. If GPU0 OOMs, shift MORE to GPU1 (`2,1`) — never toward GPU0 (binding card). |
+| `VISION` (3.8) | on | `off` drops `--mmproj` (text-only, frees the projector VRAM). MTP drafting and vision coexist (gate-verified) — no need to disable MTP for images. |
 | `SPEC_NMAX` (35B) | 3 | `4` is **+12% on RAG**, −12% creative. Try if your work is RAG-heavy. |
 | `SPEC_NMAX` (122B) | 3 | **Do not raise past 6 — it won't boot** (draft buffers OOM GPU0's 602 MiB). 6 is +10% code but makes creative 27% *slower than MTP off*. |
 | `MTP` | on | `off` if you ever see repetition. Costs ~1.5× speed. |

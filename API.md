@@ -21,17 +21,20 @@ client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server 
 
 | model id | alias | arch / placement | decode speed | load (warm) | resident VRAM |
 |---|---|---|---|---|---|
-| `qwen-27b` | `qwen36`, `qwen36-text` | 27B dense **Q4_K_XL**, GPU0 only | **101–118 t/s** | ~11–15 s | GPU0 ~23.4 GiB |
-| `qwen-27b-q6` | `qwen36-q6` | 27B dense **Q6_K_XL**, GPU0+GPU1 | ~64 code / ~37 creative | ~11–15 s | GPU0 22.3 / GPU1 10.4 GiB |
+| `qwen-38-27b` | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` | 27B dense **+ VISION** (Qwen3.8, qwen3_5 arch) **Q6_K**, GPU0+GPU1 | ~73 code / 48 @100K | ~15–20 s | GPU0 21.8 / GPU1 9.4 GiB |
 | `qwen-35b` | `qwen36-35b` | 35B-A3B **MoE**, GPU0+GPU1 | **~206 t/s** | ~16–25 s | GPU0 ~21.4 / GPU1 ~3.0 GiB |
 | `qwen-122b` | `qwen35-122b` | 122B-A10B **MoE**, GPU0+GPU1+RAM | ~37–40 t/s | ~40–90 s | GPU0+GPU1 full + ~15 GiB RAM |
 
 You may address a model by **id or alias** everywhere (`model` field, `/load`, `/upstream`).
 
-**Character, for choosing:** `qwen-35b` fastest · `qwen-122b` smartest · `qwen-27b` fast dense ·
-`qwen-27b-q6` quality-first dense (same 27B, higher quant, ~55% of Q4 speed — spans both GPUs).
+**Character, for choosing:** `qwen-35b` fastest · `qwen-122b` smartest · `qwen-38-27b` the quality
+dense **and the only one that sees images/video** (native VLM). It replaced the retired 3.6-27B dense
+line (Q4 + Q6); all their legacy aliases now resolve to it.
 
-All four: **131072 context**, **q8_0 KV** (locked), **MTP speculative decoding on**, thinking on.
+**Vision:** `qwen-38-27b` accepts OpenAI `image_url` content parts (data-URI or http URL) — images and
+video. The other two are text-only. See "Vision requests" below.
+
+All three: **131072 context**, **q8_0 KV** (locked), **MTP speculative decoding on**, thinking on.
 
 ---
 
@@ -56,11 +59,11 @@ Loads (and swaps to) a model, **blocking until it is resident**, then returns. U
 swap cost up front instead of on a user's first request.
 
 ```bash
-curl -s localhost:8000/load/qwen36-q6                 # by alias or id
+curl -s localhost:8000/load/qwen38                    # by alias or id
 curl -s -X POST localhost:8000/load -d '{"model":"qwen-122b"}'
 ```
 ```json
-{"loaded":"qwen36-q6","upstream_status":200,"running":["qwen-27b-q6"],"seconds":11.3}
+{"loaded":"qwen38","upstream_status":200,"running":["qwen-38-27b"],"seconds":16.4}
 ```
 - `200` loaded · `404` unknown model (`loaded:null`) · `502/504` load failed.
 - Idempotent: loading the already-resident model returns in ~0 s.
@@ -74,7 +77,7 @@ resident, GPUs at 0) is the **normal** resting state, not an error.
 
 ### `GET /healthz` — liveness + what's loaded
 ```json
-{"router":"ok","backend":{"swap":200,"running":["qwen-27b-q6"]}}
+{"router":"ok","backend":{"swap":200,"running":["qwen-38-27b"]}}
 ```
 `running: []` = nothing loaded (normal). `router:"degraded"` + 503 = llama-swap unreachable.
 
@@ -82,6 +85,21 @@ resident, GPUs at 0) is the **normal** resting state, not an error.
 ### passthrough — any other path proxies to llama-swap
 e.g. `GET /upstream/<model>/health`, `POST /upstream/<model>/completion` (raw llama.cpp completion
 with `timings`, used by the gate suites).
+
+### Vision requests (`qwen-38-27b` only)
+Send an image/video frame as an OpenAI `image_url` content part — data-URI or http URL. The model
+must be `qwen-38-27b` (or any of its aliases); the 35B/122B are text-only and will ignore the image.
+```bash
+IMG=$(base64 -w0 photo.png)
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model":"qwen38","max_tokens":2048,
+  "messages":[{"role":"user","content":[
+    {"type":"text","text":"Describe this image."},
+    {"type":"image_url","image_url":{"url":"data:image/png;base64,'"$IMG"'"}}]}]}' \
+| jq -r '.choices[0].message.content'
+```
+Answers still land in `content` (+ `reasoning_content` when thinking). The vision tower (`mmproj-F16`)
+is resident whenever the 27B is loaded — no separate model or endpoint.
 
 ---
 
@@ -98,10 +116,12 @@ with `timings`, used by the gate suites).
 **Throughput (decode, tokens/s, MTP on)**
 | model | code | creative | @100K ctx |
 |---|---|---|---|
-| qwen-27b (Q4) | 101–118 | ~69 | — |
-| qwen-27b-q6 | ~64 | ~37 | ~42 |
+| qwen-38-27b (Q6_K, +vision) | ~73 | — | ~48 |
 | qwen-35b | ~206 | — | — |
 | qwen-122b | ~37–40 | (MTP net-negative on creative — see below) | — |
+
+MTP draft acceptance on the 27B code path measured **0.845, AL 4.31** — and it holds *with the mmproj
+vision tower loaded* (gate-verified), so image capability costs the text path no speed.
 
 Speed is content-dependent because of MTP: high draft acceptance (code, acc ~0.86–0.90, AL ~4.3–4.5)
 runs much faster than low-acceptance creative text. Prompt-processing (prefill) is separate and far
@@ -134,8 +154,8 @@ faster (100K prefills at ~1600 t/s on the Q6).
 **Reliability knobs (defaults are good)**
 - KV cache is **q8_0 everywhere and locked** — do not switch to q4_0 (it silently breaks long-range
   retrieval; benchmarks fine, guts RAG).
-- Every model has a live regression gate (`regress.sh`, `gates27q6.sh`, `gates35.sh`, `gates122.sh`);
-  `regress.sh [0]` asserts every registered model still maps to one.
+- Every model has a live regression gate (`gates38.sh`, `gates35.sh`, `gates122.sh`, plus the
+  router-level `regress.sh`); `regress.sh [0]` asserts every registered model still maps to one.
 
 ---
 

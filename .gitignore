@@ -13,3 +13,6 @@ router/.venv/
 
 # ── runtime logs / scratch ─────────────────────────────────────────
 *.log
+
+# local config rollback backups
+swap/config.yaml.bak-*

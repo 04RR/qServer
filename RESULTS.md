@@ -480,3 +480,40 @@ tool-in-think both temps, prefix-cache, MTP-live, 100K needle `MERIDIAN-COBALT-7
 the Q4 fallback **18 PASS / 0 FAIL / 1 SKIP** — the +1 over the prior 17 is exactly the new gate-[0] line
 asserting `qwen-27b-q6 → gates27q6.sh` (a live gate, not drift). Gate [0]'s both-directions check now
 covers all four models.
+
+---
+
+# Part E — Qwen3.8-27B (dense + native VISION, replaced the 3.6-27B dense line)
+
+Qwen3.8 shipped. The **entire 3.6-27B dense line** (Part A's Q4 `qwen-27b` + Part D's Q6 `qwen-27b-q6`,
+plus the 3.6 vision projector) was **retired and its weights deleted** (~59 GiB freed), replaced by a
+single Qwen3.8-27B multimodal server `qwen-38-27b`. The 35B MoE and 122B are untouched.
+
+**What it is.** `unsloth/Qwen3.8-27B-GGUF` → `Qwen3.8-27B-Q6_K.gguf` (22.9 GiB, sha256-verified against
+the HF LFS oid `ade6d66…f22f8ccc`) + `mmproj-F16.gguf` (F16, not Q8_0 → dodges Blackwell #24399). Arch is
+`qwen3_5` — the **same family as the 35B/122B** (Gated-DeltaNet hybrid + vision), weights differ; the
+existing llama.cpp build (657e011) already has the `qwen3vl` graph, `clip_graph_qwen3vl`, and
+`gated_delta_net` kernels, so **no rebuild**. MTP head is embedded (`mtp_num_hidden_layers:1`).
+
+**Placement.** Q6_K won't fit the 4090 alone once KV + vision buffers are added, so it spans both GPUs:
+`--split-mode layer -ts 3,1 -mg 0`. Measured residency GPU0 **21810 MiB** (free 2754) / GPU1 **9360 MiB**
+(free 6951) — ≥1 GiB free on each. mmproj/clip sits on GPU0 with output.
+
+**The two risks, both resolved by measurement:**
+1. *Vision on this build* — a solid-red ground-truth image is read as "red" end-to-end (pixels → tower →
+   LLM). The `qwen3vl` mtmd path works.
+2. *MTP coexisting with `--mmproj`* (the 3.6 vision path ran WITHOUT MTP over slot-position fears) —
+   the text path still drafts with the vision tower loaded: **acceptance 0.845, AL 4.31, 73.4 t/s** code.
+
+**Speed vs the retired 3.6-Q6:** ~73 t/s code (up from 64.3) and 48 t/s @100K (up from 42.5) — 3.8-Q6_K
+is 22.9 GiB vs 3.6's 26.0 GiB Q6_K_XL, so it's both faster *and* gains vision. The embedded 3.8 chat
+template parses reasoning and tool calls cleanly (no v19 hand-fix needed).
+
+**Gates:** `gates38.sh` **17 PASS / 0 FAIL** — dual-GPU residency, digit-loop canary across split (with
+the padded-past-200 / exit==1 self-test), thinking-closure, tool-in-think both temps, MTP-live-with-mmproj,
+prefix-cache, **VISION**, 100K needle (`MERIDIAN-COBALT-7`). Run standalone on a test port (:8099) while
+the training GPU stayed untouched. `regress.sh [0]` now maps `qwen-38-27b → gates38.sh`, `qwen-35b`,
+`qwen-122b` — three models, three live gates, both directions.
+
+**Aliases carried forward:** `qwen36`, `qwen36-q6`, `qwen36-text` all resolve to `qwen-38-27b`, so every
+existing client keeps working; new names are `qwen38` / `qwen38-27b`.

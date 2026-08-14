@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Qwen regression suite for the 27B (requirement #4 enforcement: CLEAN OUTPUT).
 #
-# Runs entirely against the router (:8000) -> llama-swap -> qwen-27b (via the legacy alias "qwen36").
-# REWRITTEN for the llama-swap architecture. The old version hardcoded TEXT=:8080 and VISION=:8081
-# as ALWAYS-RESIDENT backends. Under llama-swap, backend ports are LOAD-ON-DEMAND: :8080 exists only
-# while the 27B-Q4 is loaded, and :8081 only while the 27B-Q6 is loaded. NB :8081 was vision's before
-# vision was retired -- it is NOT permanently dead, and assuming so is a live hazard: soak.py held
-# exactly this "8081 == vision" belief and quietly POSTed image payloads to the Q6 TEXT server (fixed).
+# Runs entirely against the router (:8000) -> llama-swap -> qwen-38-27b (via the legacy alias "qwen36").
+# Under llama-swap, backend ports are LOAD-ON-DEMAND: :8080 exists only while qwen-38-27b (Qwen3.8-27B
+# dense+vision) is loaded. The old separate 27B-Q4 (:8080) and 27B-Q6 (:8081) entries were REPLACED by
+# the single Qwen3.8-27B multimodal server; :8081 is now unused. NB history: :8081 was vision's before
+# the 3.6 vision path was retired, then briefly the 3.6-Q6 text server -- assuming a port is
+# "permanently X" is a live hazard (soak.py once held "8081 == vision" and POSTed images to a text server).
 # Tests [1] and [11] originally failed for architectural reasons rather than model reasons -- and this
 # suite silently stopped guarding the 27B at all.
 #   - vision test [11] and the image half of [12] are DELETED (vision retired, not broken)
@@ -18,12 +18,12 @@ set -uo pipefail
 
 ROUTER="${ROUTER:-http://127.0.0.1:8000}"
 SWAP="${SWAP:-http://127.0.0.1:9000}"
-MODEL_ID="${MODEL_ID:-qwen36}"      # legacy alias -> qwen-27b
+MODEL_ID="${MODEL_ID:-qwen36}"      # legacy alias -> qwen-38-27b (carried forward from the retired 3.6 27B)
 # Tests 5/8/9 need DIRECT backend endpoints (/apply-template, /completion timings) that the chat
 # API cannot express. The old TEXT=:8080 assumed an always-resident server; llama-swap instead
 # exposes /upstream/<model_id> for exactly this, which works regardless of which port it chose.
 # NB: the model must be LOADED first -- test [2] does that before any of these run.
-TEXT="${TEXT:-$SWAP/upstream/qwen-27b}"
+TEXT="${TEXT:-$SWAP/upstream/qwen-38-27b}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY=python3
 command -v jq >/dev/null || { echo "need jq"; exit 1; }
@@ -50,11 +50,12 @@ echo "################ Qwen regression (27B) ################"
 # directions: a model with no gate fails, and a gate for a model that no longer exists fails.
 echo "[0] every model has a live gate"
 declare -A GATE_FOR=(
-  [qwen-27b]="regress.sh"     # this file
-  [qwen-27b-q6]="gates27q6.sh" # 27B Q6_K_XL quality entry (dual-GPU layer split)
+  [qwen-38-27b]="gates38.sh"  # Qwen3.8-27B dense+vision (dual-GPU layer split) — deep direct-backend gate
   [qwen-35b]="gates35.sh"
   [qwen-122b]="gates122.sh"
 )
+# NB: this file (regress.sh) is the ROUTER-integration suite for the primary model; gates38.sh is its
+# mapped deep gate (analogous to gates35/gates122). Both are run; [0] only needs each model to map to one.
 ids=$(curl -sf -m5 "$ROUTER/v1/models" | jq -r '.data[].id' 2>/dev/null | sort)
 if [ -z "$ids" ]; then
   no "could not enumerate models from $ROUTER/v1/models"
@@ -150,10 +151,23 @@ for T in 0.6 0.2; do
   else no "temp $T: args missing city ($args)"; fi
 done
 
-# ---- 7. Mid-conversation system/developer role ----
-echo "[7] mid-convo system role"
-r=$(chat '[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"system","content":"Be terse."},{"role":"user","content":"say ok"}]')
-echo "$r" | jq -e '.error' >/dev/null 2>&1 && no "template raised: $(echo "$r"|jq -c .error)" || ok "mid-convo system accepted"
+# ---- 7. System-message contract (Qwen3.8: system MUST be first) ----
+# The 3.8 embedded template hard-raises on a system/developer message that is not first (unlike the
+# retired 3.6 v19, which tolerated mid-conversation injection). This is BY DESIGN, and the router only
+# ever PREPENDS system (proxy.py: msgs.insert(0,...) when msg[0] isn't system/developer), so no real
+# traffic through :8000 can trip it. Assert BOTH halves so a future template silently re-allowing
+# mid-convo system (a behaviour change worth knowing) still fails here.
+echo "[7] system-message contract (3.8: system must be first)"
+sf=$(chat '[{"role":"system","content":"Be terse."},{"role":"user","content":"say ok"}]' '{"max_tokens":200}')
+echo "$sf" | jq -e '.error' >/dev/null 2>&1 && no "system-first was rejected: $(echo "$sf"|jq -c .error.message)" || ok "system-first accepted"
+mid=$(chat '[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"system","content":"Be terse."},{"role":"user","content":"say ok"}]' '{"max_tokens":200}')
+if echo "$mid" | jq -e '.error.message | test("must be at the beginning"; "i")' >/dev/null 2>&1; then
+  ok "mid-convo system correctly rejected (3.8 contract: system must be first)"
+elif echo "$mid" | jq -e '.error' >/dev/null 2>&1; then
+  no "mid-convo system rejected but with an UNEXPECTED error: $(echo "$mid"|jq -c .error.message)"
+else
+  no "mid-convo system was ACCEPTED — 3.8 template contract changed (expected rejection); re-check template"
+fi
 
 # ---- 8. Prefix cache reuse (3K prefix twice) ----
 echo "[8] prefix cache reuse"
@@ -216,11 +230,11 @@ else sk "soak (set SOAK_MIN>0 to run at M4)"; fi
 # (llama-swap's job), and the load-bearing property is that the legacy alias existing clients send
 # still lands on the 27B -- NOT on a newer model. Silently repointing it would change behaviour
 # under working clients.
-echo "[12] alias dispatch (qwen36 -> qwen-27b)"
+echo "[12] alias dispatch (qwen36 -> qwen-38-27b)"
 chat '[{"role":"user","content":"reply with the single word ping"}]' '{"max_tokens":2048}' >/dev/null
 served=$(curl -sf -m5 "$ROUTER/healthz" | jq -r '.backend.running|join(",")' 2>/dev/null)
 echo "  alias '$MODEL_ID' served-by=$served"
-[ "$served" = "qwen-27b" ] && ok "alias '$MODEL_ID' -> qwen-27b" || no "alias '$MODEL_ID' landed on '$served' (expected qwen-27b)"
+[ "$served" = "qwen-38-27b" ] && ok "alias '$MODEL_ID' -> qwen-38-27b" || no "alias '$MODEL_ID' landed on '$served' (expected qwen-38-27b)"
 
 # ---- 13. Tool-call budget guard (regression for the M4 soak's 10 errors) ----
 echo "[13] tool-call truncation guard"

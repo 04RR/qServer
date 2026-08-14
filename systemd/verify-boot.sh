@@ -46,13 +46,13 @@ else echo "  !! :8000 not answering after 30s"; fail=1; fi
 echo; echo "== models registered =="
 ids=$(curl -sf -m5 http://127.0.0.1:8000/v1/models | jq -r '.data[].id' 2>/dev/null)   # one id per line
 echo "  $(echo "$ids" | paste -sd, -)"
-# grep -qx (whole-line exact), NOT -q (substring): 'qwen-27b' is a substring of 'qwen-27b-q6', so -q
-# would report the Q6 present even if only the Q4 were registered. Match exact ids, newline-separated.
-for m in qwen-27b qwen-27b-q6 qwen-35b qwen-122b; do
+# grep -qx (whole-line exact), NOT -q (substring): keeps a longer id from masking a shorter one
+# (e.g. a hypothetical 'qwen-38' substring of 'qwen-38-27b'). Match exact ids, newline-separated.
+for m in qwen-38-27b qwen-35b qwen-122b; do
   echo "$ids" | grep -qx "$m" || { echo "  !! missing model: $m"; fail=1; }
 done
 
-echo; echo "== end-to-end: 27B (via legacy alias 'qwen36') =="
+echo; echo "== end-to-end: 27B (Qwen3.8, via legacy alias 'qwen36') =="
 a=$(curl -sf -m600 http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"qwen36","messages":[{"role":"user","content":"one word: capital of France"}],"max_tokens":2048}' \
   | jq -r '.choices[0].message.content // ""' 2>/dev/null)
@@ -62,9 +62,10 @@ r=$(curl -sf -m5 http://127.0.0.1:8000/healthz | jq -r '.backend.running|join(",
 v0=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0|tr -d ' ')
 v1=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 1|tr -d ' ')
 echo "  running=$r  GPU0=${v0} GPU1=${v1}"
-[ "$r" = "qwen-27b" ] || { echo "  !! alias qwen36 did not resolve to qwen-27b"; fail=1; }
-# the 27B must NOT touch GPU1 -- if it does, pinning was lost
-[ "$v1" -lt 1000 ] 2>/dev/null || { echo "  !! 27B is using GPU1 (${v1} MiB) — pinning lost"; fail=1; }
+[ "$r" = "qwen-38-27b" ] || { echo "  !! alias qwen36 did not resolve to qwen-38-27b"; fail=1; }
+# Qwen3.8-27B (Q6) SPANS both GPUs (layer split) — unlike the retired Q4 (4090-only). GPU1 MUST be
+# resident; if it is ~0 the --tensor-split never applied (whole model crammed onto GPU0 or OOM).
+[ "$v1" -gt 5000 ] 2>/dev/null || { echo "  !! 27B not resident on GPU1 (${v1} MiB) — layer split didn't apply"; fail=1; }
 
 echo; echo "== end-to-end: swap to 35B, and PROVE the 27B was evicted first =="
 a2=$(curl -sf -m900 http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' \

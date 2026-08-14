@@ -14,7 +14,7 @@ request at 512 tokens, truncating long code generation and 100K RAG answers. The
 which is conditional logic on the request body. Hence the chain. See regression test #13.
 
 Model routing is llama-swap's job: we pass `model` through untouched (it is the swap key).
-Aliases ("qwen36" -> qwen-27b, "qwen36-35b" -> qwen-35b) are configured in swap/config.yaml.
+Aliases ("qwen36"/"qwen38" -> qwen-38-27b, "qwen36-35b" -> qwen-35b) are configured in swap/config.yaml.
 
 Deps: starlette, uvicorn, httpx (installed into router/.venv by setup.sh via uv).
 """
