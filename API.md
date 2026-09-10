@@ -1,10 +1,10 @@
 # Qwen local inference — API reference
 
-One OpenAI-compatible endpoint, four models, **one resident at a time**. Everything below is served
+One OpenAI-compatible endpoint, several models, **one resident at a time**. Everything below is served
 from a single host; there is no cloud dependency and no API key check (bind is localhost by default).
 
 ```
-client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server (one of four)
+client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server (one at a time)
            (tool guard,        (model manager:      (the actual model,
             system prompt,       load / swap /        MTP + q8_0 KV,
             /load /unload)       mutual exclusion)    131072 ctx)
@@ -21,20 +21,22 @@ client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server 
 
 | model id | alias | arch / placement | decode speed | load (warm) | resident VRAM |
 |---|---|---|---|---|---|
-| `qwen-38-27b` | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` | 27B dense **+ VISION** (Qwen3.8, qwen3_5 arch) **Q6_K**, GPU0+GPU1 | ~73 code / 48 @100K | ~15–20 s | GPU0 21.8 / GPU1 9.4 GiB |
+| `qwen-38-27b` | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` | 27B dense **+ VISION** (Qwen3.8, qwen3_5 arch), GPU0+GPU1 — profiles: **UD-Q6_K_M** `-ts 4,1`/n5 or **plain Q6_K** `-ts 3,1`/n4 | UD ~69 code / 57 RAG@32K / 37 @100K · plain ~+8% | ~15–20 s | UD: GPU0 22.7 / GPU1 8.9 · plain: GPU0 21.8 / GPU1 9.4 GiB |
 | `qwen-35b` | `qwen36-35b` | 35B-A3B **MoE**, GPU0+GPU1 | **~206 t/s** | ~16–25 s | GPU0 ~21.4 / GPU1 ~3.0 GiB |
-| `qwen-122b` | `qwen35-122b` | 122B-A10B **MoE**, GPU0+GPU1+RAM | ~37–40 t/s | ~40–90 s | GPU0+GPU1 full + ~15 GiB RAM |
+| `qwen-38-flash-next` | `flash-next`, `qwen38-next` | 125B-A6B **MoE + VISION** (Qwen3.8-Flash-Next, qwen4exp; PLE on NVMe, MTP) | ~18.8 t/s (15.3 @100K) | ⚠️ **~150 s cold** | GPU0 ~22 / GPU1 ~15 GiB + ~34 GiB mmap |
 
 You may address a model by **id or alias** everywhere (`model` field, `/load`, `/upstream`).
 
-**Character, for choosing:** `qwen-35b` fastest · `qwen-122b` smartest · `qwen-38-27b` the quality
-dense **and the only one that sees images/video** (native VLM). It replaced the retired 3.6-27B dense
-line (Q4 + Q6); all their legacy aliases now resolve to it.
+**Character, for choosing:** `qwen-35b` fastest · `qwen-38-flash-next` biggest/smartest (**but ~150 s to
+swap in — batch its work, don't interleave it turn-by-turn**) · `qwen-38-27b` the quality dense. **Both the
+27B and Flash-Next see images/video** (native VLMs); the 27B replaced the retired 3.6-27B dense line
+(Q4 + Q6) and carries its legacy aliases.
 
-**Vision:** `qwen-38-27b` accepts OpenAI `image_url` content parts (data-URI or http URL) — images and
-video. The other two are text-only. See "Vision requests" below.
+**Vision:** `qwen-38-27b` **and `qwen-38-flash-next`** accept OpenAI `image_url` content parts (data-URI or
+http URL) — images and video. `qwen-35b` is text-only. See "Vision requests" below.
 
-All three: **131072 context**, **q8_0 KV** (locked), **MTP speculative decoding on**, thinking on.
+All: **131072 context**, **MTP speculative decoding on**, thinking on. **q8_0 KV** (locked) on the 27B/35B;
+**Flash-Next uses f16 KV** (q8_0 asserts on its QSA path).
 
 ---
 
@@ -60,7 +62,7 @@ swap cost up front instead of on a user's first request.
 
 ```bash
 curl -s localhost:8000/load/qwen38                    # by alias or id
-curl -s -X POST localhost:8000/load -d '{"model":"qwen-122b"}'
+curl -s -X POST localhost:8000/load -d '{"model":"flash-next"}'   # ~150 s cold — pre-warm before a user waits
 ```
 ```json
 {"loaded":"qwen38","upstream_status":200,"running":["qwen-38-27b"],"seconds":16.4}
@@ -72,7 +74,7 @@ curl -s -X POST localhost:8000/load -d '{"model":"qwen-122b"}'
 ```bash
 curl -s localhost:8000/unload      # -> {"unloaded":true,"upstream_status":200}
 ```
-Releases VRAM **and** the 122B's RAM slice (process dies → all tiers reclaimed). Idle (nothing
+Releases VRAM **and** Flash-Next's ~34 GiB RAM/mmap tier (process dies → all tiers reclaimed). Idle (nothing
 resident, GPUs at 0) is the **normal** resting state, not an error.
 
 ### `GET /healthz` — liveness + what's loaded
@@ -88,7 +90,7 @@ with `timings`, used by the gate suites).
 
 ### Vision requests (`qwen-38-27b` only)
 Send an image/video frame as an OpenAI `image_url` content part — data-URI or http URL. The model
-must be `qwen-38-27b` (or any of its aliases); the 35B/122B are text-only and will ignore the image.
+must be `qwen-38-27b` or `qwen-38-flash-next` (or their aliases); `qwen-35b` is text-only and will ignore the image.
 ```bash
 IMG=$(base64 -w0 photo.png)
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -107,33 +109,41 @@ is resident whenever the 27B is loaded — no separate model or endpoint.
 
 **Latency budget**
 - **Cold model swap is the dominant cost.** Loading/swapping blocks the first request: ~11–25 s for
-  the 27B/35B, **~40–90 s for the 122B** (48 GiB across VRAM+RAM). Warm (page-cache) is the low end;
-  first-ever-after-boot is the high end. **Pre-warm with `/load`** if a user shouldn't wait.
+  the 27B/35B, **~150 s for Flash-Next** (cold 29 GiB VRAM read + lazy PLE/expert faulting off NVMe).
+  **Pre-warm with `/load`**, and **batch Flash-Next work** — interleaving it with other models pays ~150 s a switch.
 - **First request after any load is ~15% slower** (CUDA graph warmup). Not a regression.
 - **Set the proxy/client read timeout to `None`/infinite.** The router already does; a cold swap or a
   100K-token generation legitimately runs for minutes. Connect timeout ~10 s is fine.
 
 **Throughput (decode, tokens/s, MTP on)**
-| model | code | creative | @100K ctx |
-|---|---|---|---|
-| qwen-38-27b (Q6_K, +vision) | ~73 | — | ~48 |
-| qwen-35b | ~206 | — | — |
-| qwen-122b | ~37–40 | (MTP net-negative on creative — see below) | — |
+| model | code (short) | RAG@32K | @100K ctx | @244K ctx |
+|---|---|---|---|---|
+| qwen-38-27b **UD-Q6_K_M** (`4,1`/n5, +vision) | ~69 | ~57 | ~37 | ~26 |
+| qwen-38-27b **plain Q6_K** (`3,1`/n4, +vision) | ~77 | ~50 | ~48 | — |
+| qwen-35b | ~206 | — | — | — |
+| qwen-38-flash-next | ~18.8 | — | ~15.3 | — |
 
-MTP draft acceptance on the 27B code path measured **0.845, AL 4.31** — and it holds *with the mmproj
-vision tower loaded* (gate-verified), so image capability costs the text path no speed.
+Two 27B quant profiles (toggle via `swap/config.yaml.q6km` / `.plain`): **UD-Q6_K_M** is imatrix
+(quality) but ~8–10% slower — intrinsic to the mixed-bit-width dequant, *not* a split artifact (re-tuning
+`TS` recovers only ~2%). It's tuned `-ts 4,1`/`SPEC_NMAX=5` for code/RAG; **plain Q6_K** is uniform and faster.
 
-Speed is content-dependent because of MTP: high draft acceptance (code, acc ~0.86–0.90, AL ~4.3–4.5)
-runs much faster than low-acceptance creative text. Prompt-processing (prefill) is separate and far
-faster (100K prefills at ~1600 t/s on the Q6).
+MTP draft acceptance on the 27B code path measured **0.83–0.89, AL 4.3–5.0** (AL 5.0 at `n=5`) — and it holds
+*with the mmproj vision tower loaded* (gate-verified), so image capability costs the text path no speed.
+
+Speed is content-dependent because of MTP: high draft acceptance (code, acc ~0.83–0.89) runs ~2× faster
+than low-acceptance creative text (acc ~0.35). Decode also halves from short → 244K ctx (growing KV read).
+Prompt-processing (prefill) is separate and far faster (~1.1–1.2K t/s at 100K).
+
+**Max context:** native 262144 is reachable only at `TS=2,1` (razor-thin, <1 GiB/GPU free; deep-needle-verified);
+`3,1`/`4,1` cap ~180K. Safe ≥1 GiB/GPU ≈ 235–245K @ `2,1`.
 
 **Context**
-- **131072 tokens** for all four. Prefix cache is on: a repeated prompt prefix reprocesses in ~7% of
+- **131072 tokens** for all. Prefix cache is on: a repeated prompt prefix reprocesses in ~7% of
   the first-time cost (e.g. 1990 ms → 140 ms). Reuse prefixes for cheap multi-turn.
 
 **Output budget — the #1 integration bug**
 - These models **think before answering**; reasoning consumes the token budget. Set
-  **`max_tokens` ≥ 2048** (27B/35B) / **≥ 4096** (122B), or the answer truncates and `content` comes
+  **`max_tokens` ≥ 2048** (27B/35B) / **≥ 4096** (Flash-Next), or the answer truncates and `content` comes
   back **EMPTY** while everything went to `reasoning_content`.
 - **Read both fields.** With thinking on, the visible answer is in `choices[0].message.content` and
   the chain-of-thought is in `choices[0].message.reasoning_content` — the latter can be non-empty
@@ -148,13 +158,13 @@ faster (100K prefills at ~1600 t/s on the Q6).
 
 **Tool calls**
 - Standard OpenAI `tools`/`tool_calls`. The router **auto-raises `max_tokens` to a floor when `tools`
-  are present** (512 for 27B/35B, **4096 for the 122B**) so the tool JSON can't truncate mid-argument
+  are present** (512 for 27B/35B, **4096 for Flash-Next**) so the tool JSON can't truncate mid-argument
   (a truncated call → llama.cpp 500). Your own `max_tokens` is used if already above the floor.
 
 **Reliability knobs (defaults are good)**
 - KV cache is **q8_0 everywhere and locked** — do not switch to q4_0 (it silently breaks long-range
   retrieval; benchmarks fine, guts RAG).
-- Every model has a live regression gate (`gates38.sh`, `gates35.sh`, `gates122.sh`, plus the
+- Every model has a live regression gate (`gates38.sh`, `gates35.sh`, `gates38next.sh`, plus the
   router-level `regress.sh`); `regress.sh [0]` asserts every registered model still maps to one.
 
 ---

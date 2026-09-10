@@ -26,8 +26,8 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
 
 ROOT=~/ai/qwen36
 BIN="$ROOT/llama.cpp/build/bin/llama-server"          # always absolute — never PATH-resolved
-MODEL="$ROOT/models/Qwen3.8-27B-Q6_K.gguf"            # unsloth/Qwen3.8-27B-GGUF, byte-verified
-MMPROJ="$ROOT/models/mmproj-Qwen3.8-F16.gguf"         # F16, NOT Q8_0 -> avoids Blackwell #24399 on the 5060 Ti
+MODEL="${MODEL:-$ROOT/models/Qwen3.8-27B-Q6_K.gguf}"  # unsloth/Qwen3.8-27B-GGUF, byte-verified; env-overridable
+MMPROJ="${MMPROJ:-$ROOT/models/mmproj-Qwen3.8-F16.gguf}" # F16, NOT Q8_0 -> avoids Blackwell #24399 on the 5060 Ti
 
 # --- tunables (overridable via env) ---
 CTX="${CTX:-131072}"                # native is 262144; 131072 keeps VRAM headroom for vision buffers.
@@ -43,8 +43,28 @@ VISION="${VISION:-on}"              # on|off. off drops --mmproj (text-only; fre
 PORT="${PORT:-8080}"               # backend port. 8080 = the primary-dense slot (replaces qwen-27b).
                                     #   Overridable so a standalone gate can use a non-colliding port.
 
+# --- EXPERIMENTAL: ngram-mod drafter (draftless LCG-hash table over the token stream) --------------
+# NGRAM=on stacks a draftless recall drafter WITH MTP via the comma-list --spec-type draft-mtp,ngram-mod.
+# Precedence: ngram-mod PREEMPTS MTP whenever its ~16 MB pool has a hit (chained single-token lookups →
+# variable-length draft, stops at first miss); MTP (--spec-draft-n-max) is the FALLBACK depth on a miss.
+# Lossless: the target verifies the whole block and accepts only its own samples. Default OFF (unchanged).
+NGRAM="${NGRAM:-off}"               # off|on
+NG_MATCH="${NG_MATCH:-24}"          # --spec-ngram-mod-n-match: lookup n-gram length (<16 warns: poor quality)
+NG_MIN="${NG_MIN:-24}"             # --spec-ngram-mod-n-min: minimum drafted tokens
+NG_MAX="${NG_MAX:-86}"             # --spec-ngram-mod-n-max: maximum drafted tokens (variable, stops at miss)
+SEED="${SEED:-1234}"               # fixed seed — measurement reproducibility (acc spread 0.836..0.891 across
+                                    #   unseeded runs swamps small effects). SEED=-1 restores production variety.
+
 SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 [ "$MTP" = "off" ] && SPEC_ARGS=(--spec-type none)
+# ngram-mod stacks only when MTP is on (it preempts, MTP is the fallback). MTP=off keeps --spec-type none.
+if [ "$NGRAM" = "on" ] && [ "$MTP" != "off" ]; then
+  SPEC_ARGS=(--spec-type draft-mtp,ngram-mod
+             --spec-draft-n-max "$SPEC_NMAX"
+             --spec-ngram-mod-n-match "$NG_MATCH"
+             --spec-ngram-mod-n-min  "$NG_MIN"
+             --spec-ngram-mod-n-max  "$NG_MAX")
+fi
 
 MMPROJ_ARGS=(--mmproj "$MMPROJ")
 [ "$VISION" = "off" ] && MMPROJ_ARGS=()
@@ -66,4 +86,5 @@ exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
   --reasoning-preserve \
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \
   --presence-penalty 0.0 --repeat-penalty 1.0 \
+  --seed "$SEED" \
   --host 0.0.0.0 --port "$PORT"

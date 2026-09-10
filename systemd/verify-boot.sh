@@ -48,7 +48,7 @@ ids=$(curl -sf -m5 http://127.0.0.1:8000/v1/models | jq -r '.data[].id' 2>/dev/n
 echo "  $(echo "$ids" | paste -sd, -)"
 # grep -qx (whole-line exact), NOT -q (substring): keeps a longer id from masking a shorter one
 # (e.g. a hypothetical 'qwen-38' substring of 'qwen-38-27b'). Match exact ids, newline-separated.
-for m in qwen-38-27b qwen-35b qwen-122b; do
+for m in qwen-38-27b qwen-35b qwen-38-flash-next; do
   echo "$ids" | grep -qx "$m" || { echo "  !! missing model: $m"; fail=1; }
 done
 
@@ -84,28 +84,6 @@ if [ "$v0b" -gt 18000 ] && [ "$v1b" -gt 2000 ] && [ "$v1b" -lt 6000 ] 2>/dev/nul
   echo "  OK: 35B min-spill residency (GPU0=${v0b} GPU1=${v1b}) — 27B was fully evicted first"
 else
   echo "  !! 35B residency off-plan: GPU0=${v0b} GPU1=${v1b} (expect ~21000/~3000)"; fail=1
-fi
-
-echo; echo "== end-to-end: swap to the 122B (TRI-TIER: GPU0 + GPU1 + system RAM) =="
-# ~40-50s to load 48 GiB across three tiers; longer from cold page cache.
-a3=$(curl -sf -m900 http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"qwen-122b","messages":[{"role":"user","content":"one word: capital of Italy"}],"max_tokens":4096}' \
-  | jq -r '.choices[0].message.content // ""' 2>/dev/null)
-echo "  answer: $(echo "$a3" | tr -d '\n' | head -c 40)"
-echo "$a3" | grep -qi rome || { echo "  !! unexpected answer"; fail=1; }
-r3=$(curl -sf -m5 http://127.0.0.1:8000/healthz | jq -r '.backend.running|join(",")')
-v0c=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0|tr -d ' ')
-v1c=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 1|tr -d ' ')
-rss=$(awk '/VmRSS/{print int($2/1024)}' /proc/$(pgrep -f "bin/llama-server"|head -1)/status 2>/dev/null)
-echo "  running=$r3  GPU0=${v0c} GPU1=${v1c} RSS=${rss} MiB"
-[ "$r3" = "qwen-122b" ] || { echo "  !! swap did not land on qwen-122b"; fail=1; }
-# Tri-tier residency is only reachable if the PREVIOUS model was fully evicted first (23 GiB of
-# GPU0 + both cards + a ~15 GiB RAM slice cannot coexist with it). So this doubles as the
-# eviction assertion -- we prove the stack by exercising it, not by reading resident VRAM.
-if [ "$v0c" -gt 20000 ] && [ "$v1c" -gt 12000 ] && [ "$rss" -gt 8000 ] 2>/dev/null; then
-  echo "  OK: 122B tri-tier residency (GPU0=${v0c} GPU1=${v1c} RAM=${rss}) — prior model fully evicted"
-else
-  echo "  !! 122B residency off-plan: GPU0=${v0c} GPU1=${v1c} RSS=${rss} (expect ~23900/~14650/~17000)"; fail=1
 fi
 
 echo

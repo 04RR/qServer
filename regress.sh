@@ -52,7 +52,10 @@ echo "[0] every model has a live gate"
 declare -A GATE_FOR=(
   [qwen-38-27b]="gates38.sh"  # Qwen3.8-27B dense+vision (dual-GPU layer split) — deep direct-backend gate
   [qwen-35b]="gates35.sh"
-  [qwen-122b]="gates122.sh"
+  [qwen-35b-batch]="gates35.sh"  # -np 4 batch variant (signalpost SCORE) — same GGUF/placement, same gate
+  [qwen-embed]="gates-embed.sh"  # Qwen3-Embedding-0.6B (CPU, concurrent) — /v1/embeddings shape+semantics
+  [qwen-embed-gpu]="gates-embed.sh"  # same model on the 4090 (on-demand heavy) — same shape/semantics gate
+  [qwen-38-flash-next]="../flashnext/gates38next.sh"  # qwen4exp 125B; gate lives in the ISOLATED tree ($HERE/../flashnext)
 )
 # NB: this file (regress.sh) is the ROUTER-integration suite for the primary model; gates38.sh is its
 # mapped deep gate (analogous to gates35/gates122). Both are run; [0] only needs each model to map to one.

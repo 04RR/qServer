@@ -382,3 +382,34 @@ Also: `/upstream/<model_id>` is llama-swap's primitive for the direct-backend en
 hardcoded port, and load the model first.
 Also: **delete retired tests, do not leave them as permanent SKIPs** — a SKIP that can never run is
 noise that trains you to ignore the suite's output.
+
+---
+
+## ngram-mod drafter stacked with MTP (2026-08-21, build cd26896c1)
+
+**What:** `--spec-type draft-mtp,ngram-mod` — a draftless recall drafter (16 MB LCG-hash pool over the token
+stream, chained single-token lookups → variable-length drafts) stacked with MTP. ngram-mod PREEMPTS MTP on a
+pool hit; MTP is the miss-fallback (so `--spec-draft-n-max` became a fallback depth). Env-gated in
+`run-38-27b.sh` (`NGRAM`/`NG_MATCH`/`NG_MIN`/`NG_MAX`), default OFF. Full report: `RESULTS-ngram.md`.
+
+**Verdict: works, lossless, but the win is narrow — did NOT make it the default.** +142% (2.4×, → 151 t/s) on
+edit-in-place / re-emitting a large file at the tuned `n_match=32 n_max=86`; flat everywhere else with
++150–320 ms p99 stalls on reproduction classes. N1 greedy diff was byte-identical (lossless confirmed); all
+gates38 + N0–N7 pass; 16 MB pool.
+
+**The load-bearing insight — reasoning kills the average benefit.** With reasoning ON (production), the
+chain-of-thought is 44–95% of generated tokens and ngram-mod CANNOT accelerate it (novel — nothing to
+recall). The gain lands only on the *answer*, and only when the answer is large verbatim reproduction. So the
+"quote-heavy RAG" class F (the supposed win) was only +9% (within noise): its 163-token quote was drowned by
+2077 tokens of novel reasoning. **Measuring reasoning-off would have massively overstated the production win.**
+
+**Traps hit (each cost a re-run):**
+- The per-drafter `statistics` lines are `LOG_TRC` (verbosity 4 / `LLAMA_ARG_LOG_VERBOSITY=4`), and the type
+  string is **`ngram-mod`** (hyphen), NOT `ngram_mod` (underscore, as some docs write it). N0 grep must match
+  the hyphen or it false-fails "one drafter absent".
+- Reproduction must be forced into the OUTPUT stream: a reproduction prompt with thinking ON puts the recall
+  into reasoning and the model may never re-emit → ngram never hits. N0 needs thinking-off + reproduce+novel.
+- Tuning matters a lot: `n_match=32 > 24` (acc 0.43→0.65 — longer key, fewer false hits); `n_max=86 > 128`
+  (drafting past the recall horizon wastes verification on a rejected tail). Community's low n_max is right.
+- Fixed `--seed` does NOT give identical outputs across drafter configs at temp>0 — batch-shape changes flip
+  near-tie samples (the N1 phenomenon), so reason-token counts differ baseline-vs-ngram. Rates still compare.

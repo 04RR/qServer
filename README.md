@@ -1,19 +1,22 @@
 # qServer — local Qwen inference stack
 
-A bulletproof local inference stack for three Qwen models on a single dual-GPU workstation
+A bulletproof local inference stack for several Qwen models on a single dual-GPU workstation
 (RTX 4090 + RTX 5060 Ti + system RAM), managed by [llama-swap](https://github.com/mostlygeek/llama-swap)
 behind one OpenAI-compatible endpoint. Models are **mutually exclusive** — one resident at a time,
 loaded on demand by name.
 
 | model | id (alias) | placement | speed |
 |---|---|---|---|
-| 27B dense **+ vision** (Qwen3.8) Q6_K | `qwen-38-27b` (`qwen38`, `qwen36`, `qwen36-q6`) | 4090 + 5060 Ti | ~73 t/s code · 48 @100K |
+| 27B dense **+ vision** (Qwen3.8), 2 quant profiles | `qwen-38-27b` (`qwen38`, `qwen36`, `qwen36-q6`) | 4090 + 5060 Ti | UD-Q6_K_M ~69 code · 57 RAG@32K · plain Q6_K ~+8% |
 | 35B-A3B MoE | `qwen-35b` (`qwen36-35b`) | 4090 + 5060 Ti | ~206 t/s |
-| 122B-A10B MoE | `qwen-122b` (`qwen35-122b`) | 4090 + 5060 Ti + RAM | ~37–40 t/s |
+| 125B-A6B MoE **+ vision** (Qwen3.8-Flash-Next) | `qwen-38-flash-next` (`flash-next`, `qwen38-next`) | 4090 + 5060 Ti + RAM (PLE on NVMe) | ~18.8 t/s · ⚠️ **~150 s cold swap-in — batch its work** |
 
-All: 131072 context, q8_0 KV, MTP speculative decoding, thinking on. The 27B is a native
-**vision-language** model (images + video) and replaced the retired 3.6-27B dense line (Q4 + Q6);
-its legacy aliases (`qwen36`, `qwen36-q6`, `qwen36-text`) carry forward so existing clients keep working.
+All: 131072 context, MTP speculative decoding, thinking on (q8_0 KV — **except Flash-Next, which uses f16**;
+q8_0 asserts on its QSA path). The 27B **and Flash-Next** are native **vision-language** models (images +
+video). The 27B replaced the retired 3.6-27B dense line (Q4 + Q6); its legacy aliases (`qwen36`,
+`qwen36-q6`, `qwen36-text`) carry forward so existing clients keep working.
+The 27B has **two swappable quant profiles** — `UD-Q6_K_M` (imatrix, quality; `-ts 4,1`/MTP `n=5`) and
+`plain Q6_K` (uniform, ~+8% faster) — toggled via `swap/config.yaml.q6km` / `.plain` (see USAGE.md).
 
 ## Docs
 - **[API.md](API.md)** — the OpenAI-compatible API, every endpoint, and the metrics anyone building on it needs.

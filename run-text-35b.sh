@@ -32,6 +32,16 @@ NGL="${NGL:-99}"
 MTP="${MTP:-on}"                    # on|off
 PORT="${PORT:-8082}"
 
+# NP: llama-server parallel slots. Default 1 (unchanged behaviour).
+#
+# IMPORTANT: -c is the TOTAL context, and llama-server divides it across slots, so each slot
+# gets CTX/NP. NP=4 with the default CTX=131072 leaves 32768 tokens per slot. Total KV cache
+# (and therefore VRAM) is unchanged, so raising NP is VRAM-neutral - it trades per-request
+# context for concurrency. Batch classification wants the concurrency; long-context RAG wants
+# the context. That is why signalpost drives a separate llama-swap entry (qwen-35b-batch)
+# instead of this default being changed.
+NP="${NP:-1}"
+
 # M4 sweep knob: which layers' routed experts spill to CUDA1. Climb from min-spill (6 -> 10 -> 16).
 # Plain-464 pool only; never 34/38/39 (Q6_K-bumped) and never 40 (MTP block).
 SPILL="${SPILL:-28|29|30|31|32|33}"
@@ -52,7 +62,7 @@ SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 # `-sm none` would risk never creating the CUDA1 backend at all.
 exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
   -m "$MODEL" --alias qwen36-35b \
-  -ngl "$NGL" -c "$CTX" -fa on -np 1 \
+  -ngl "$NGL" -c "$CTX" -fa on -np "$NP" \
   -sm layer -ts "$TS" -mg 0 \
   "${OT_ARGS[@]}" \
   "${SPEC_ARGS[@]}" \

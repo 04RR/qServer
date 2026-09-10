@@ -54,18 +54,10 @@ models:
       - "qwen36-35b"
 
   # BATCH-CLASSIFICATION VARIANT of qwen-35b — same GGUF, same placement, 4 parallel slots.
-  #
-  # Added for signalpost's SCORE stage, which issues many small grammar-constrained requests
-  # (~1k prompt, ~76 completion tokens each). With -np 1 those strictly serialise, so throughput
-  # is one request's latency however much headroom the GPU has.
-  #
-  # This is a SEPARATE entry rather than -np 4 on qwen-35b because -c is the total context and
-  # llama-server divides it across slots: -np 4 would silently cut per-request context from
-  # 131072 to 32768 for every existing caller. Total KV (and VRAM) is identical either way, so
-  # the two entries differ only in how the same budget is carved up. 32768/slot is far more than
-  # the 4000-char body cap the scorer sends.
-  #
-  # Same exclusive group, so it can never be resident alongside another chat model.
+  # Added for signalpost's SCORE stage (many small grammar-constrained requests). SEPARATE entry
+  # rather than -np 4 on qwen-35b because -c is the TOTAL context divided across slots: -np 4 would
+  # silently cut every existing caller's per-request ctx from 131072 to 32768. Total KV/VRAM identical.
+  # Same exclusive group, so never resident alongside another chat model.
   "qwen-35b-batch":
     name: "Qwen3.6-35B-A3B MoE — batch (4 slots x 32k)"
     description: "Same model/placement as qwen-35b with -np 4. For many small concurrent requests (classification, scoring). Per-slot ctx 32768."
@@ -140,7 +132,7 @@ routing:
           members:
             - qwen-38-27b
             - qwen-35b
-            - qwen-35b-batch
+            - qwen-35b-batch        # -np 4 batch variant of the 35B (signalpost SCORE); same GGUF, :8083
             - qwen-38-flash-next    # qwen4exp 125B MoE+PLE+MTP; isolated binary (~/ai/flashnext), :8085
             - qwen-embed-gpu        # on-demand GPU embedder; shares the 4090 exclusively with the chat models
         "embed-persistent":

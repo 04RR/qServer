@@ -40,13 +40,32 @@ TOOL_MIN_TOKENS = int(os.environ.get("TOOL_MIN_TOKENS", "512"))
 # (M2 gate 5). 512 would truncate its tool calls outright. Keyed by the model/alias the client
 # sends; falls back to TOOL_MIN_TOKENS.
 TOOL_MIN_BY_MODEL = json.loads(os.environ.get("TOOL_MIN_BY_MODEL", json.dumps({
-    "qwen-122b":   4096,
-    "qwen35-122b": 4096,
+    # qwen4exp flash-next thinks long and variably -> floor its tool budget to 4096 (keyed by id + aliases)
+    "qwen-38-flash-next": 4096,
+    "flash-next":  4096,
+    "qwen38-next": 4096,
 })))
 
-# read=None: a cold model swap pages ~21 GB off disk and can take ~25s before the first byte;
-# long-context generations run for minutes. Neither must time out at the proxy.
-CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=None))
+# Read timeout: generous, but FINITE.
+#
+# This was read=None, for a good reason - a cold model swap pages ~21 GB off disk and can take
+# ~25s before the first byte, and long-context generations run for minutes. Neither should time
+# out at the proxy.
+#
+# But None has a failure mode that only shows up under load. llama-server queues requests beyond
+# its slot count, and a queued request produces no bytes while it waits. With no read deadline a
+# saturated backend does not return errors, it returns nothing, forever: the client blocks, the
+# caller has no signal, and the only symptom is a job that never finishes. A finite deadline
+# turns that silent hang into a timeout the caller can retry or report.
+#
+# 900s is chosen to sit above the worst legitimate wait (a cold 122B swap plus a long generation)
+# and below "forever". Override with ROUTER_READ_TIMEOUT if a workload genuinely needs longer;
+# set it to 0 to restore the old unbounded behaviour.
+_read_timeout_env = os.environ.get("ROUTER_READ_TIMEOUT", "900").strip()
+READ_TIMEOUT = None if _read_timeout_env in ("0", "none", "") else float(_read_timeout_env)
+CLIENT = httpx.AsyncClient(
+    timeout=httpx.Timeout(connect=10.0, read=READ_TIMEOUT, write=60.0, pool=None)
+)
 
 
 def _guard_tool_budget(payload: dict):

@@ -517,3 +517,64 @@ the training GPU stayed untouched. `regress.sh [0]` now maps `qwen-38-27b → ga
 
 **Aliases carried forward:** `qwen36`, `qwen36-q6`, `qwen36-text` all resolve to `qwen-38-27b`, so every
 existing client keeps working; new names are `qwen38` / `qwen38-27b`.
+
+---
+
+# Part F — Qwen3.8-27B UD-Q6_K_M (imatrix), llama.cpp update, tuning & context ceiling (2026-08-21)
+
+**llama.cpp updated** `657e011 → cd26896c1` (build 553, ggml 0.20.2) — 552-commit fast-forward + rebuild
+(CUDA 12.8, arch `89;120`). smpbo #23385 patch **still required and NOT upstream** (master reads
+`sharedMemPerBlockOptin` raw; new #26141 would *disable MMQ* on our cards given a garbage read) — re-applied
+in the `#else` CUDA branch, verified `cd26896c1-dirty`. Fallback binary `llama.cpp/bin-fallback-657e011/`.
+Control gate on the **current Q6_K** quant: **gates38 17/0**, residency UNCHANGED (#26177 "count nextn/MTP
+in -ngl" did not shift the split), small free win: code tg **73.4 → 76.7 t/s**, accept 0.845 → 0.891.
+
+**UD-Q6_K_M vs plain Q6_K (both on the new build).** The download (`models/Qwen38-27B-6_K_M/`) ships the
+main file (imatrix dynamic quant, 23.1 GB, MTP **embedded** — `block_count 65`, `blk.64.nextn.*`), a
+*redundant* Q4_0 MTP sidecar, and an identical mmproj. Both quants gate 17/0.
+
+| metric (TS=3,1) | plain Q6_K | UD-Q6_K_M |
+|---|---|---|
+| code tg (short) | **76.7** | 68.7 |
+| 100K tg | **48.4** | 37.1 |
+
+**The ~8–10% deficit is intrinsic to the imatrix quant, not the split** — re-tuning `TS` toward the 4090
+(`4,1`→70.3, `7,2`→69.9) recovers only ~2%. Mixed per-tensor bit-widths cost more bytes/token + a
+less-uniform dequant path. UD's only upside is imatrix quality (unmeasurable by our gates).
+
+**Context depth vs decode tg** (both quants, `TS=2,1 CTX=262144`, temp 0, creative/low-accept ≈ decode floor):
+
+| depth | plain | UD |
+|---|---|---|
+| 2K | 40.0 | 32.6 |
+| 63K | 29.7 | 26.7 |
+| 100K | 25.1 | 23.5 |
+| 176K | 20.3 | 19.6 |
+| 240K | 18.0 | 16.0 |
+
+Plain leads at essentially every depth; both ~halve from 2K→240K (growing-KV bandwidth). Content dominates:
+**code (acc ~0.88) runs ~2× creative (acc ~0.35)** on identical config.
+
+**Context ceiling** (hybrid arch — only 16 of 64 layers carry KV, `full_attention_interval=4`, ≈34 KiB/token
+q8_0). `TS=3,1 @ 262144` **OOMs GPU0** (compute buffer). `TS=2,1 @ 262144` **loads + retrieves** — a 244,204-token
+needle recalled `MERIDIAN-COBALT-7` (pp 979, tg 26.4) — but razor-thin (GPU0 937 / GPU1 467 MiB free). Safe
+≥1 GiB/GPU max ≈ **235–245K @ 2,1**; `3,1`/`4,1` daily ceiling ≈ **180K**. (`needle35.py` no longer hardcodes
+131072 — now `NCTX`-aware.)
+
+**Tuning for code/RAG + vision (UD, vision always on, CTX=131072).** Grid over `TS` × `SPEC_NMAX`:
+
+| config | GPU0 free | code short | RAG@32K |
+|---|---|---|---|
+| `3,1` n4 (UD stock) | 2837 | 65.2 | 50.4 |
+| `4,1` n4 | 1603 | 70.0 | 49.3 |
+| **`4,1` n5** | 1477 | 69.5 | **57.4** |
+| `4,1` n6 | 1351 | 66.6 | 58.6 |
+
+`TS=4,1` (weight→4090) = +7% short; `SPEC_NMAX=5` = **+14% RAG@32K** (AL 4.3→5.0) at −0.7% short; `n=6` helps RAG
+only +1 but hurts short; `5,1` unsafe (GPU0 <1 GiB with vision). **Chosen: `TS=4,1 SPEC_NMAX=5`** — certified
+**gates38 17/0** (AL 5.00, GPU0 1902 free, 100K needle, vision).
+
+**Shipped as two swappable profiles** (same aliases/vision/ctx): `swap/config.yaml.q6km` (UD, `4,1`/n5, quality)
+and `swap/config.yaml.plain` (plain Q6_K, `3,1`/n4, ~+8% faster). Toggle = `cp <profile> swap/config.yaml`
++ `sudo systemctl restart qwen-swap`. Run script gained env-overridable `MODEL`/`MMPROJ`. Both profiles keep
+exactly 3 models so `regress.sh [0]` stays consistent.

@@ -118,7 +118,9 @@ dn,da,pn,tps=int(dn),int(da),int(pn),float(tps)
 if dn==0: print("MTP NOT DRAFTING with mmproj loaded (draft_n=0) -> set MTP=off or split servers"); sys.exit(1)
 acc=da/dn; al=pn/(pn-da) if pn>da else 99
 print(f"acceptance={acc:.3f} AL={al:.2f} tg={tps:.1f} t/s")
-sys.exit(0 if (acc>0 and al>1.0) else 1)' && ok "MTP contributing (text path) with vision loaded" || no "MTP not contributing with mmproj loaded"
+# FLOOR acc>=0.70 on short-code (baseline MTP ~0.82-0.89; ngram-on aggregate ~0.81): acc>0 alone could
+# not catch an acceptance regression. 0.70 clears both MTP-only and MTP+ngram-mod on this code prompt.
+sys.exit(0 if (acc>=0.70 and al>1.0) else 1)' && ok "MTP contributing (text path) with vision loaded" || no "MTP not contributing/acc<0.70 with mmproj loaded"
 
 # ---- 7. Prefix-cache reuse ----
 echo "[7] prefix cache reuse"

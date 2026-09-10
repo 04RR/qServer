@@ -37,8 +37,9 @@ for _ in range(4):
 prompt = build(n)
 t = ntok(prompt)
 print(f"  calibrated: {n} sentences -> {t} tokens (rate {rate:.1f} tok/sentence, target {TARGET})")
-if t > 131072 - 2048:
-    print(f"  ABORT: {t} would exceed n_ctx"); sys.exit(1)
+NCTX = int(os.environ.get("NCTX", "131072"))   # server n_ctx; override for >128K runs (was hardcoded 131072)
+if t > NCTX - 2048:
+    print(f"  ABORT: {t} would exceed n_ctx={NCTX}"); sys.exit(1)
 
 try:
     d = post("/v1/chat/completions", {
