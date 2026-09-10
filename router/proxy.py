@@ -44,6 +44,9 @@ TOOL_MIN_BY_MODEL = json.loads(os.environ.get("TOOL_MIN_BY_MODEL", json.dumps({
     "qwen-38-flash-next": 4096,
     "flash-next":  4096,
     "qwen38-next": 4096,
+    "qwen-38-flash-next-batch": 4096,
+    "flash-next-batch": 4096,
+    "qwen38-next-batch": 4096,
 })))
 
 # Read timeout: generous, but FINITE.

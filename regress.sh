@@ -56,6 +56,7 @@ declare -A GATE_FOR=(
   [qwen-embed]="gates-embed.sh"  # Qwen3-Embedding-0.6B (CPU, concurrent) — /v1/embeddings shape+semantics
   [qwen-embed-gpu]="gates-embed.sh"  # same model on the 4090 (on-demand heavy) — same shape/semantics gate
   [qwen-38-flash-next]="../flashnext/gates38next.sh"  # qwen4exp 125B; gate lives in the ISOLATED tree ($HERE/../flashnext)
+  [qwen-38-flash-next-batch]="../flashnext/gates38next.sh"  # same GGUF/placement (-np 4, MTP-off, text-only); same gate
 )
 # NB: this file (regress.sh) is the ROUTER-integration suite for the primary model; gates38.sh is its
 # mapped deep gate (analogous to gates35/gates122). Both are run; [0] only needs each model to map to one.
