@@ -133,14 +133,15 @@ models:
   # slots), MTP OFF (net loss at concurrency), VISION OFF (text-only). The CPU expert tier is the decode
   # wall; batching amortizes each RAM expert-read across concurrent sequences, so THROUGHPUT scales even
   # though single-token latency doesn't. For bulk indexing/scoring, not interactive chat. -c is TOTAL ctx
-  # / slots -> 32768 per slot at NP=4. Same exclusive group; ~150 s cold swap-in. NCM=31 (verified fit).
-  # NOTE: MTP-off+vision-off free ~9 GiB but ~5.2 is on GPU1; TS=40,8 loads freed low/mid layers onto GPU0
-  # (only ~3.6 free), so NCM=26 OOM'd GPU0. To exploit GPU1's headroom, rebalance TS toward GPU1 (untried).
+  # / slots -> 32768 per slot at NP=4. Same exclusive group; ~150 s cold swap-in. NCM=28 TS=37,11: rebalanced
+  # toward GPU1 (MTP-off freed ~4 GiB there) — GPU0 keeps ~9 expert layers, GPU1 takes 11 (was 8) => +3 off CPU.
+  # Verified GPU0 20724/GPU1 15094 (1.2 free); +17% aggregate throughput @8-concurrent vs NCM=31,40/8. (NCM<31 at
+  # TS=40,8 OOMs GPU0 — the freed VRAM is on GPU1, reached only by lowering the split; NCM=26 here would be tighter.)
   "qwen-38-flash-next-batch":
     name: "Qwen3.8-Flash-Next — batch (4 slots x 32k, MTP off, text-only)"
     description: "Same 125B GGUF/placement as qwen-38-flash-next with -np 4, MTP off, vision off. Bulk throughput (indexing/scoring): amortizes the CPU expert reads across concurrent sequences. Per-slot ctx 32768."
     cmd: >-
-      env NP=4 SPEC_OFF=1 VISION=off NO_WARMUP=1 NCM=31 TS=40,8 MG=0 CTX=131072 PORT=8089
+      env NP=4 SPEC_OFF=1 VISION=off NO_WARMUP=1 NCM=28 TS=37,11 MG=0 CTX=131072 PORT=8089
       /home/rohit/ai/flashnext/run-38-flash-next.sh
     proxy: http://127.0.0.1:8089
     checkEndpoint: /health
