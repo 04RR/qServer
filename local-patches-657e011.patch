@@ -1,0 +1,22 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 0878ab9c0..a419b7fc9 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -289,6 +289,17 @@ static ggml_cuda_device_info ggml_cuda_init() {
+                       (size_t)(prop.totalGlobalMem / (1024 * 1024)));
+ #else
+         info.devices[id].smpbo = prop.sharedMemPerBlockOptin;
++        // Workaround for Blackwell/WSL driver bug (#23385): some early launch drivers
++        // (incl. 591.86) report a garbage sharedMemPerBlockOptin (0 on some Windows
++        // configs, or an overflowed value like 0x100000001). llama.cpp maps this to
++        // smpbo; a 0 makes MMQ dispatch conclude every kernel needs more shared memory
++        // than exists and abort with mmq_x_best == 0. Fall back to the always-valid
++        // sharedMemPerBlock when the reported value is implausible.
++        if (info.devices[id].smpbo == 0 || info.devices[id].smpbo > (size_t)(1u << 20)) {
++            GGML_LOG_WARN("  Device %d: implausible sharedMemPerBlockOptin=%zu, falling back to sharedMemPerBlock=%zu (#23385)\n",
++                          id, info.devices[id].smpbo, (size_t) prop.sharedMemPerBlock);
++            info.devices[id].smpbo = prop.sharedMemPerBlock;
++        }
+         info.devices[id].cc = 100*prop.major + 10*prop.minor;
+         GGML_LOG_INFO("  Device %d: %s, compute capability %d.%d, VMM: %s, VRAM: %zu MiB\n",
+                       id, prop.name, prop.major, prop.minor, device_vmm ? "yes" : "no",
