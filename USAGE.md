@@ -111,9 +111,13 @@ curl -s localhost:8000/v1/models | jq -r '.data[].id'
 watch -n1 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
 ```
 
-**max_tokens matters.** These models think before answering, and the reasoning eats the budget.
-Use **≥2048** for the 27B/35B and **≥4096** for flash-next, or `content` comes back EMPTY while
-`reasoning_content` holds everything. (The router auto-raises it for *tool* calls only.)
+**No output caps — don't set `max_tokens`.** The router strips `max_tokens`/`max_completion_tokens`/
+`n_predict` from every chat request (`NO_OUTPUT_CAPS`, default on), so a turn runs to its natural stop —
+the old "set ≥2048 / ≥4096 or `content` comes back EMPTY" footgun is gone. Generation stops cleanly at
+EOS or the 131072 context limit (context shift is off). Want a **bounded** output (datagen, not agents)?
+Send header **`X-Respect-Max-Tokens: 1`** and your `max_tokens` is honoured. **Stream long turns**
+(`stream: true`) for a tighter per-chunk timeout. **Agents: use the main entries (131072 ctx), not the
+`-batch` ones (32768/slot — bulk throughput, not long turns).**
 
 **Answers live in two fields** when thinking is on:
 ```bash
@@ -123,9 +127,10 @@ jq -r '.choices[0].message.content'             # the answer
 
 **Thinking is always on — clients cannot disable it.** The router (`FORCE_THINKING`, default on) overrides
 `enable_thinking=false`, remaps a non-standard `reasoning_effort` (e.g. `"none"`) to `"low"`, and strips the
-`<|think_off|>` soft switch; on any such flip it raises `max_tokens` to the per-model floor (512 for 27B/35B,
-4096 for Flash-Next) and never lowers a client's value. So **every** chat response has a `reasoning_content`.
-Set `FORCE_THINKING=0` on `router/run-router.sh` + restart `qwen-router` to restore pass-through.
+`<|think_off|>` soft switch. So **every** chat response has a `reasoning_content`. (It no longer needs to
+floor `max_tokens` for the thinking: with caps stripped the turn is unbounded; the per-model floor of 512 /
+4096 applies only on the `X-Respect-Max-Tokens:1` path, never lowering a larger client value.) Set
+`FORCE_THINKING=0` on `router/run-router.sh` + restart `qwen-router` to restore pass-through.
 
 ---
 

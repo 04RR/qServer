@@ -2,17 +2,20 @@
 """
 Qwen3.6 router — one OpenAI-compatible endpoint on :8000.
 
-  client -> router :8000 (tool-budget guard, system-prompt injection) -> llama-swap :9000 -> llama-server
+  client -> router :8000 (output-cap strip, force-thinking, system-prompt injection) -> llama-swap :9000 -> llama-server
 
 WHY THIS ROUTER EXISTS (vision is NOT retired — the 27B and flash-next are multimodal):
 Model routing, image requests included, is llama-swap's job: we pass `model` through untouched (it is
-the swap key), so a multimodal model receives image content unchanged. The router's own job is the two
-things llama-swap CANNOT express: the tool-budget guard and system-prompt injection. llama-swap's
-`filters.setParams` is an unconditional set ("always runs for the model"), not a floor, and it
-cannot condition on `tools` being present. Configuring max_tokens=512 there would cap EVERY
-request at 512 tokens, truncating long code generation and 100K RAG answers. The guard needs
-    IF tools present AND max_tokens < floor THEN raise to floor
-which is conditional logic on the request body. Hence the chain. See regression test #13.
+the swap key), so a multimodal model receives image content unchanged. The router's own job is the
+request-body transforms llama-swap CANNOT express, because its `filters.setParams` is an unconditional
+set ("always runs for the model"), never conditional on the body:
+  - OUTPUT-CAP strip (NO_OUTPUT_CAPS, default on): drop max_tokens/max_completion_tokens/n_predict so an
+    agentic turn is never truncated; a client opts back into a bounded output with X-Respect-Max-Tokens:1,
+    and ONLY then does the per-model tool/thinking floor apply (the conditional
+        IF tools present AND max_tokens < floor THEN raise to floor
+    that setParams cannot express — see regression #13/#15).
+  - FORCE_THINKING (default on): thinking is always on; neutralize every client disable mechanism.
+  - System-prompt injection.
 
 Aliases ("qwen36"/"qwen38" -> qwen-38-27b, "qwen36-35b" -> qwen-35b) are configured in swap/config.yaml.
 
@@ -63,26 +66,50 @@ FORCE_THINKING = os.environ.get("FORCE_THINKING", "1").strip().lower() not in ("
 _REFFORT_KEEP = {"low", "medium", "high", "xhigh"}   # thinking-ON effort levels the 3.8 template accepts
 _THINK_OFF = "<|think_off|>"
 
-# Read timeout: generous, but FINITE.
+# NO OUTPUT CAPS (default ON). Agentic turns must not be truncated by a client-sent output budget, so
+# STRIP max_tokens / max_completion_tokens / n_predict from EVERY chat request and let generation run to
+# the model's natural stop (EOS) or the context limit. This matches the Qwen3.8 card's guidance to allow
+# "adequate output length". A client that genuinely wants a BOUNDED output (e.g. AudioServer prose datagen)
+# opts back in PER-REQUEST with the header `X-Respect-Max-Tokens: 1`; only on that path are the caps honoured
+# AND the per-model tool/thinking floors (below) applied — stripping makes those floors redundant otherwise.
+# NO_OUTPUT_CAPS=0 disables the feature entirely (caps respected globally, old floor behaviour restored).
+NO_OUTPUT_CAPS = os.environ.get("NO_OUTPUT_CAPS", "1").strip().lower() not in ("0", "false", "no", "off", "")
+_RESPECT_CAPS_HEADER = "x-respect-max-tokens"           # client opt-out: `X-Respect-Max-Tokens: 1`
+_CAP_KEYS = ("max_tokens", "max_completion_tokens", "n_predict")
+
+# Read timeouts: generous, but FINITE — and DIFFERENT for streaming vs non-streaming.
 #
-# This was read=None, for a good reason - a cold model swap pages ~21 GB off disk and can take
-# ~25s before the first byte, and long-context generations run for minutes. Neither should time
-# out at the proxy.
+# httpx's `read` timeout is the max gap allowed between successive socket reads, NOT a total deadline,
+# so it means two different things depending on how the backend sends the body:
 #
-# But None has a failure mode that only shows up under load. llama-server queues requests beyond
-# its slot count, and a queued request produces no bytes while it waits. With no read deadline a
-# saturated backend does not return errors, it returns nothing, forever: the client blocks, the
-# caller has no signal, and the only symptom is a job that never finishes. A finite deadline
-# turns that silent hang into a timeout the caller can retry or report.
+#   * STREAMING (SSE): a healthy stream delivers tokens continuously, so `read` acts as a per-CHUNK
+#     deadline. A gap this long means the backend wedged or the request is stuck in llama-server's
+#     queue producing nothing. 900s sits above the worst legitimate gap — a cold ~21 GB model swap
+#     pages off disk and can take ~25s+ before the first token (far longer for the flash-next ~150s
+#     cold load) — and below "forever".
+#   * NON-STREAMING: llama-server sends the WHOLE body in one burst at the END of generation, so the
+#     first (and only) read does not complete until the entire turn is generated. Now that output caps
+#     are stripped (NO_OUTPUT_CAPS), an uncapped agentic turn on a cold-swapped model can run for many
+#     minutes, so this deadline must cover the full generation: 7200s. Agents SHOULD stream (see
+#     USAGE.md) to get the tighter per-chunk deadline instead of this long blanket one.
 #
-# 900s is chosen to sit above the worst legitimate wait (a cold 122B swap plus a long generation)
-# and below "forever". Override with ROUTER_READ_TIMEOUT if a workload genuinely needs longer;
-# set it to 0 to restore the old unbounded behaviour.
-_read_timeout_env = os.environ.get("ROUTER_READ_TIMEOUT", "900").strip()
-READ_TIMEOUT = None if _read_timeout_env in ("0", "none", "") else float(_read_timeout_env)
+# A finite deadline turns the load failure mode — a saturated backend returning nothing, forever, with
+# no signal to the caller — into a timeout the caller can retry or report. Override with
+# ROUTER_READ_TIMEOUT (streaming) / ROUTER_READ_TIMEOUT_NONSTREAM; set either to 0 to restore unbounded.
+def _parse_timeout(env_name: str, default: str):
+    v = os.environ.get(env_name, default).strip().lower()
+    return None if v in ("0", "none", "") else float(v)
+
+STREAM_READ_TIMEOUT    = _parse_timeout("ROUTER_READ_TIMEOUT", "900")            # per-chunk (streaming)
+NONSTREAM_READ_TIMEOUT = _parse_timeout("ROUTER_READ_TIMEOUT_NONSTREAM", "7200") # whole-body (non-stream)
 CLIENT = httpx.AsyncClient(
-    timeout=httpx.Timeout(connect=10.0, read=READ_TIMEOUT, write=60.0, pool=None)
+    timeout=httpx.Timeout(connect=10.0, read=STREAM_READ_TIMEOUT, write=60.0, pool=None)
 )
+
+
+def _read_timeout_for(streaming_hint: bool):
+    """Per-chunk deadline for a stream; whole-body deadline for a non-streaming turn (see the note above)."""
+    return STREAM_READ_TIMEOUT if streaming_hint else NONSTREAM_READ_TIMEOUT
 
 
 def _guard_tool_budget(payload: dict):
@@ -174,6 +201,24 @@ def _floor_max_tokens(payload: dict, floor: int):
     return raised
 
 
+def _respect_caps(header_value) -> bool:
+    """A chat request's output caps are RESPECTED (not stripped) when NO_OUTPUT_CAPS is off globally, or
+    the request carries `X-Respect-Max-Tokens: 1`. Otherwise the caps are stripped (the default)."""
+    if not NO_OUTPUT_CAPS:
+        return True
+    return (header_value or "").strip() == "1"
+
+
+def _strip_output_caps(payload: dict):
+    """Remove every output-budget key (max_tokens / max_completion_tokens / n_predict) so an agentic turn
+    runs to its natural stop. Returns the list of (key, value) removed, for logging; no-op if none present."""
+    stripped = []
+    for key in _CAP_KEYS:
+        if key in payload:
+            stripped.append((key, payload.pop(key)))
+    return stripped
+
+
 async def _forward(request, body: bytes, streaming_hint: bool):
     url = SWAP_BACKEND + request.url.path
     if request.url.query:
@@ -186,7 +231,10 @@ async def _forward(request, body: bytes, streaming_hint: bool):
     # accept-encoding is not enough: httpx then auto-adds its own "gzip, deflate", the backend
     # compresses, and the client receives gzipped bytes with no content-encoding header to decode.
     headers["accept-encoding"] = "identity"
-    req = CLIENT.build_request(request.method, url, headers=headers, content=body)
+    # per-chunk deadline for a stream, whole-body deadline for a non-streaming turn (see the timeout note).
+    req = CLIENT.build_request(request.method, url, headers=headers, content=body,
+                               timeout=httpx.Timeout(connect=10.0, read=_read_timeout_for(streaming_hint),
+                                                     write=60.0, pool=None))
     resp = await CLIENT.send(req, stream=True)
     resp_headers = {k: v for k, v in resp.headers.items()
                     if k.lower() not in ("content-length", "transfer-encoding", "connection", "content-encoding")}
@@ -214,18 +262,28 @@ async def chat(request):
         payload = {}
     if payload:
         _maybe_inject_system(payload)
-        bumped = _guard_tool_budget(payload)
-        if bumped:
-            print(f"[router] tools present: raised {bumped[0]} {bumped[1]} -> {bumped[2]} "
-                  f"(avoid tool-call truncation)", flush=True)
-        flips = _force_thinking(payload)
-        if flips:
-            # thinking was forced on -> give it room: raise max_tokens to the per-model floor (same floors
-            # as the tool guard: 512 for 27B/35B, 4096 for flash-next). Never lower a client value.
-            raised = _floor_max_tokens(payload, TOOL_MIN_BY_MODEL.get(payload.get("model"), TOOL_MIN_TOKENS))
-            print(f"[router] FORCE_THINKING {payload.get('model')}: {'; '.join(flips)}"
-                  + (f"; raised {raised[0]} {raised[1]}->{raised[2]}" if raised
-                     else "; max_tokens left as-is"), flush=True)
+        flips = _force_thinking(payload)        # thinking is forced on in BOTH cap regimes
+
+        # Output caps. Default: strip the client's output budget so an agentic turn runs to its natural
+        # stop. A client opts back into a BOUNDED output with `X-Respect-Max-Tokens: 1`; only on that path
+        # do the per-model tool/thinking floors apply (they are redundant once caps are stripped).
+        if _respect_caps(request.headers.get(_RESPECT_CAPS_HEADER)):
+            bumped = _guard_tool_budget(payload)
+            if bumped:
+                print(f"[router] X-Respect-Max-Tokens: tools present, raised {bumped[0]} {bumped[1]} -> "
+                      f"{bumped[2]} (avoid tool-call truncation)", flush=True)
+            raised = (_floor_max_tokens(payload, TOOL_MIN_BY_MODEL.get(payload.get("model"), TOOL_MIN_TOKENS))
+                      if flips else None)
+            if flips:
+                print(f"[router] FORCE_THINKING {payload.get('model')}: {'; '.join(flips)}"
+                      + (f"; raised {raised[0]} {raised[1]}->{raised[2]}" if raised
+                         else "; max_tokens left as-is") + " [X-Respect-Max-Tokens]", flush=True)
+        else:
+            for key, val in _strip_output_caps(payload):   # one log line per stripped key
+                print(f"[router] NO_OUTPUT_CAPS {payload.get('model')}: stripped {key}={val} "
+                      f"(uncapped output)", flush=True)
+            if flips:
+                print(f"[router] FORCE_THINKING {payload.get('model')}: {'; '.join(flips)}", flush=True)
         body = json.dumps(payload).encode()   # `model` passes through untouched — it is the swap key
     stream = bool(payload.get("stream"))
     return await _forward(request, body, stream)

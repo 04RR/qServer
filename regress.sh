@@ -249,7 +249,9 @@ echo "  alias '$MODEL_ID' served-by=$served"
 echo "[13] tool-call truncation guard"
 GTOOLS='[{"type":"function","function":{"name":"run","description":"run a shell command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}}]'
 # small max_tokens + tools: DIRECT to text backend should truncate the tool call (finish=length / partial args);
-# through the ROUTER, the guard raises max_tokens so the tool call completes with valid JSON args.
+# through the ROUTER the tool call completes with valid JSON args. (Under NO_OUTPUT_CAPS, default on, the
+# router STRIPS max_tokens entirely on this header-less request; on the X-Respect-Max-Tokens:1 path the
+# per-model tool floor would raise it instead. Either way the call is not truncated — that is what [13] asserts.)
 guard_check() {
   jq -n --argjson tl "$GTOOLS" '{model:"qwen36",stream:false,max_tokens:80,temperature:0.4,tools:$tl,messages:[{"role":"user","content":"Call the run tool to do a long detailed listing of /var/log."}]}' \
     | curl -s "$1/v1/chat/completions" -H 'Content-Type: application/json' -d @-
@@ -274,6 +276,29 @@ echo "  reasoning_content=$ftrc chars, content=$ftcc chars"
 if [ "$ftrc" -gt 0 ] 2>/dev/null && [ "$ftcc" -gt 0 ] 2>/dev/null; then \
   ok "force-thinking: reasoning_content AND content both non-empty despite enable_thinking=false"
 else no "force-thinking FAILED: reasoning=$ftrc content=$ftcc (expected both >0 — is FORCE_THINKING on and the router restarted?)"; fi
+
+# ---- 15. NO_OUTPUT_CAPS: a tiny client max_tokens must NOT truncate an agentic turn ----
+# New output-caps policy: the router STRIPS max_tokens/max_completion_tokens/n_predict from every chat
+# request (default), so a client that sends a small budget still gets a COMPLETE answer (finish=stop).
+# (b) proves the opt-out: with X-Respect-Max-Tokens:1 and a plain request (no thinking-flip, no tools ->
+# no floor), the cap is honoured and the same task truncates (finish=length).
+echo "[15] no-output-caps strip + X-Respect-Max-Tokens opt-out"
+CAPREQ='{"model":"qwen36","stream":false,"max_tokens":50,"temperature":0,"messages":[{"role":"user","content":"List the integers from 1 to 40, one per line. Then write one sentence summarizing the list."}]}'
+# (a) default path: tiny cap stripped -> runs to completion
+r15=$(curl -s -m 600 "$ROUTER/v1/chat/completions" -H 'Content-Type: application/json' -d "$CAPREQ")
+fin15=$(echo "$r15" | jq -r '.choices[0].finish_reason // ""')
+c15=$(echo "$r15" | jq -r '.choices[0].message.content // "" | length')
+echo "  stripped: finish=$fin15 content=$c15 chars"
+if [ "$fin15" = "stop" ] && [ "$c15" -gt 0 ] 2>/dev/null; then \
+  ok "max_tokens=50 stripped -> complete answer (finish=stop, $c15 chars)"
+else no "cap not stripped: finish=$fin15 content=$c15 (expected finish=stop; is NO_OUTPUT_CAPS on and the router restarted?)"; fi
+# (b) opt-out path: same tiny cap, honoured -> truncates
+r15b=$(curl -s -m 600 "$ROUTER/v1/chat/completions" -H 'Content-Type: application/json' \
+            -H 'X-Respect-Max-Tokens: 1' -d "$CAPREQ")
+fin15b=$(echo "$r15b" | jq -r '.choices[0].finish_reason // ""')
+echo "  opt-out: finish=$fin15b"
+[ "$fin15b" = "length" ] && ok "X-Respect-Max-Tokens:1 honours the cap (finish=length)" \
+  || no "opt-out not honoured: finish=$fin15b (expected length)"
 
 echo "###################################################"
 echo "PASS=$pass FAIL=$fail SKIP=$skip"

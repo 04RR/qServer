@@ -38,9 +38,14 @@ http URL) — images and video. `qwen-35b` is text-only. See "Vision requests" b
 All: **131072 context**, **thinking is ALWAYS ON — clients cannot disable it.** The router (`FORCE_THINKING`,
 default on) overrides `chat_template_kwargs.enable_thinking=false`, drops a top-level `enable_thinking=false`,
 remaps a non-standard `reasoning_effort` (e.g. `"none"`) to `"low"`, and strips the `<|think_off|>` soft
-switch — then raises `max_tokens` to the per-model floor (512 for 27B/35B, 4096 for Flash-Next) so the forced
-thinking isn't truncated (a client's larger `max_tokens` is never lowered). The 27B/35B use **MTP speculative
-decoding** + **q8_0 KV** (locked).
+switch. The 27B/35B use **MTP speculative decoding** + **q8_0 KV** (locked).
+
+**No output caps (default).** The router **strips `max_tokens` / `max_completion_tokens` / `n_predict`** from
+every chat request (`NO_OUTPUT_CAPS`, default on) so an agentic turn runs to its natural stop (EOS) or the
+context limit — never truncated by a client budget. **Do not rely on `max_tokens`; it is ignored.** A client
+that genuinely wants a **bounded** output (e.g. datagen) opts back in **per request** with the header
+**`X-Respect-Max-Tokens: 1`**; only on that path is the cap honoured *and* the per-model tool/thinking floor
+applied (512 for 27B/35B, 4096 for Flash-Next, never lowering a larger client value).
 
 **Sampling defaults** match each model's Qwen card: 27B & Flash-Next(+batch) run temp 1.0 / top_p 0.95 /
 top_k 20 / min_p 0 (the 3.8 thinking profile). **`qwen-35b`/`-batch` run temp 0.6** — deliberately the
@@ -56,11 +61,15 @@ path). It uses the mainline llama.cpp build, `-t 16`, and `-ctxcp 8` context che
 ## Endpoints (router, :8000)
 
 ### `POST /v1/chat/completions` — OpenAI chat
-Standard OpenAI schema. `stream: true` supported (SSE passthrough). The router adds two behaviors:
-1. **System-prompt injection** — if you don't send a `system`/`developer` message first, it prepends
+Standard OpenAI schema. `stream: true` supported (SSE passthrough) — **stream for long turns** (see
+*Output* below). The router adds these behaviors:
+1. **Output-cap strip** — `max_tokens`/`max_completion_tokens`/`n_predict` are removed by default
+   (`NO_OUTPUT_CAPS`); opt out per request with `X-Respect-Max-Tokens: 1`. See *Output* below.
+2. **Force-thinking** — thinking is always on; client disables are neutralized (see above).
+3. **System-prompt injection** — if you don't send a `system`/`developer` message first, it prepends
    `"You are Qwen, created by Alibaba Cloud. You are a helpful assistant."` (disable with
    `INJECT_SYSTEM=0` on the router).
-2. **Tool-budget guard** — see *Gotcha: tool calls* below.
+4. **Tool-budget floor** — on the `X-Respect-Max-Tokens:1` path only; see *Gotcha: tool calls* below.
 
 ```bash
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -175,13 +184,20 @@ so the `TS=40,8` split holds for vision.
 - **131072 tokens** for all. Prefix cache is on: a repeated prompt prefix reprocesses in ~7% of
   the first-time cost (e.g. 1990 ms → 140 ms). Reuse prefixes for cheap multi-turn.
 
-**Output budget — the #1 integration bug**
-- These models **think before answering**; reasoning consumes the token budget. Set
-  **`max_tokens` ≥ 2048** (27B/35B) / **≥ 4096** (Flash-Next), or the answer truncates and `content` comes
-  back **EMPTY** while everything went to `reasoning_content`.
+**Output — no caps (agentic default)**
+- The router **strips `max_tokens`/`max_completion_tokens`/`n_predict`** from every chat request, so a
+  turn runs to its natural stop — **your budget is ignored; you no longer need to set one.** This fixed
+  the old #1 integration bug (thinking eats a small budget → `content` empty, everything in
+  `reasoning_content`). Generation stops cleanly at EOS or the 131072 context limit (context shift is off).
+- **Want a bounded output?** Send header **`X-Respect-Max-Tokens: 1`** and your `max_tokens` is honoured
+  (then floored to 512 / 4096 only if a tool/thinking floor applies). Use this for datagen, not agents.
+- **Stream long turns** (`stream: true`): a streamed request gets a tight per-chunk read deadline; a
+  non-streaming one holds the socket for the whole generation (up to a 7200s read timeout).
+- **Agents: use the main entries** (`qwen-38-27b`, `qwen-35b`, `qwen-38-flash-next`) — **131072 context**.
+  The `-batch` entries split context across 4 slots = **32768/slot**; they are for bulk throughput, not
+  long agentic turns.
 - **Read both fields.** With thinking on, the visible answer is in `choices[0].message.content` and
-  the chain-of-thought is in `choices[0].message.reasoning_content` — the latter can be non-empty
-  while the former is empty if you under-budgeted.
+  the chain-of-thought is in `choices[0].message.reasoning_content`.
 
 **Concurrency**
 - **One model resident at a time; one request at a time** (`--parallel 1` on the interactive entries;
@@ -193,9 +209,11 @@ so the `TS=40,8` split holds for vision.
   Batch by model, or pin one model for a workload.
 
 **Tool calls**
-- Standard OpenAI `tools`/`tool_calls`. The router **auto-raises `max_tokens` to a floor when `tools`
-  are present** (512 for 27B/35B, **4096 for Flash-Next**) so the tool JSON can't truncate mid-argument
-  (a truncated call → llama.cpp 500). Your own `max_tokens` is used if already above the floor.
+- Standard OpenAI `tools`/`tool_calls`. By default the output cap is stripped, so a tool call can't
+  truncate mid-argument (a truncated call → llama.cpp 500) — the turn runs unbounded. On the
+  `X-Respect-Max-Tokens:1` path, where your cap is honoured, the router instead **raises `max_tokens`
+  to a floor when `tools` are present** (512 for 27B/35B, **4096 for Flash-Next**), using your own value
+  if already above the floor.
 
 **Reliability knobs (defaults are good)**
 - KV cache is **q8_0 everywhere and locked** — do not switch to q4_0 (it silently breaks long-range

@@ -5,6 +5,8 @@
 #
 # Keeps every hard rule: -sm layer only (never row/tensor), -ot ONE comma arg, GPUs pinned by UUID,
 # f16 KV default, mmap on (NO --load-mode none), NEVER GGML_CUDA_ENABLE_UNIFIED_MEMORY, no --mlock.
+# --no-context-shift is EXPLICIT (the build already defaults it off): with output caps stripped at the
+# router, an over-long turn must stop cleanly at the context limit, never silently drop early history.
 # New-build knobs added for the sweep:
 #   UB             -> -b/-ub (prefill ubatch; unset = build default 2048/512)
 #   SPEC_UB        -> --spec-draft-n-ubatch (MTP draft ubatch)
@@ -63,6 +65,7 @@ exec env CUDA_VISIBLE_DEVICES="$GPU_BOTH" GGML_CUDA_REGISTER_HOST="${GGML_CUDA_R
   -c "$CTX" --cache-type-k "$KVK" --cache-type-v "$KVV" \
   "${UBA[@]}" \
   -ngl 99 -sm layer "${TSA[@]}" -mg "$MG" -fa on \
+  --no-context-shift \
   -ot "$PLE_OT" \
   --n-cpu-moe "$NCM" \
   "${MCA[@]}" "${WARM[@]}" "${LM[@]}" "${LVA[@]}" "${CKA[@]}" "${TA[@]}" \
