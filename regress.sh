@@ -264,6 +264,17 @@ if [ "$rerr" = "ERR" ]; then no "router tool call errored: $(echo "$rr"|jq -c .e
 elif echo "$rargs" | jq -e . >/dev/null 2>&1 && echo "$rargs" | grep -q "}"; then ok "router guard: tool args valid JSON ($rargs)"
 else no "router guard failed: truncated/invalid args ($rargs, finish=$rfin)"; fi
 
+# ---- 14. FORCE_THINKING: a client enable_thinking=false must STILL think (router forces it on) ----
+echo "[14] force-thinking (client sends enable_thinking=false)"
+ftresp=$(chat '[{"role":"user","content":"What is 17 * 23? Reason it out, then give the number."}]' \
+              '{"chat_template_kwargs":{"enable_thinking":false},"max_tokens":512,"temperature":0}')
+ftrc=$(echo "$ftresp" | jq -r '.choices[0].message.reasoning_content // "" | length')
+ftcc=$(echo "$ftresp" | jq -r '.choices[0].message.content // "" | length')
+echo "  reasoning_content=$ftrc chars, content=$ftcc chars"
+if [ "$ftrc" -gt 0 ] 2>/dev/null && [ "$ftcc" -gt 0 ] 2>/dev/null; then \
+  ok "force-thinking: reasoning_content AND content both non-empty despite enable_thinking=false"
+else no "force-thinking FAILED: reasoning=$ftrc content=$ftcc (expected both >0 — is FORCE_THINKING on and the router restarted?)"; fi
+
 echo "###################################################"
 echo "PASS=$pass FAIL=$fail SKIP=$skip"
 [ "$fail" -eq 0 ]

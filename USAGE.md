@@ -121,6 +121,12 @@ jq -r '.choices[0].message.reasoning_content'   # the thinking
 jq -r '.choices[0].message.content'             # the answer
 ```
 
+**Thinking is always on — clients cannot disable it.** The router (`FORCE_THINKING`, default on) overrides
+`enable_thinking=false`, remaps a non-standard `reasoning_effort` (e.g. `"none"`) to `"low"`, and strips the
+`<|think_off|>` soft switch; on any such flip it raises `max_tokens` to the per-model floor (512 for 27B/35B,
+4096 for Flash-Next) and never lowers a client's value. So **every** chat response has a `reasoning_content`.
+Set `FORCE_THINKING=0` on `router/run-router.sh` + restart `qwen-router` to restore pass-through.
+
 ---
 
 ## Point real tools at it

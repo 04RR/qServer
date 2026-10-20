@@ -35,7 +35,12 @@ swap in — batch its work, don't interleave it turn-by-turn**) · `qwen-38-27b`
 **Vision:** `qwen-38-27b` **and `qwen-38-flash-next`** accept OpenAI `image_url` content parts (data-URI or
 http URL) — images and video. `qwen-35b` is text-only. See "Vision requests" below.
 
-All: **131072 context**, thinking on. The 27B/35B use **MTP speculative decoding** + **q8_0 KV** (locked).
+All: **131072 context**, **thinking is ALWAYS ON — clients cannot disable it.** The router (`FORCE_THINKING`,
+default on) overrides `chat_template_kwargs.enable_thinking=false`, drops a top-level `enable_thinking=false`,
+remaps a non-standard `reasoning_effort` (e.g. `"none"`) to `"low"`, and strips the `<|think_off|>` soft
+switch — then raises `max_tokens` to the per-model floor (512 for 27B/35B, 4096 for Flash-Next) so the forced
+thinking isn't truncated (a client's larger `max_tokens` is never lowered). The 27B/35B use **MTP speculative
+decoding** + **q8_0 KV** (locked).
 
 **Sampling defaults** match each model's Qwen card: 27B & Flash-Next(+batch) run temp 1.0 / top_p 0.95 /
 top_k 20 / min_p 0 (the 3.8 thinking profile). **`qwen-35b`/`-batch` run temp 0.6** — deliberately the

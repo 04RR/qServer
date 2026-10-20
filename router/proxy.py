@@ -49,6 +49,20 @@ TOOL_MIN_BY_MODEL = json.loads(os.environ.get("TOOL_MIN_BY_MODEL", json.dumps({
     "qwen38-next-batch": 4096,
 })))
 
+# FORCE THINKING (default ON). Thinking is always on for chat requests; clients CANNOT disable it.
+# This supersedes router/NONTHINKING-SAMPLING.proposal.md (which would have injected a non-thinking
+# sampling profile — now moot, since the non-thinking path never reaches the model). Set FORCE_THINKING=0
+# to restore pass-through. The three neutralized disable mechanisms (from the chat-template audit):
+#   - chat_template_kwargs.enable_thinking=false (all entries honour it)   -> set true
+#   - a top-level enable_thinking=false (non-standard "equivalent")        -> dropped
+#   - reasoning_effort set to a non-standard value e.g. "none" (the 3.8 template RAISES on unknown values;
+#     the 3.6/35B template ignores reasoning_effort)                        -> remapped to "low"
+#   - the <|think_off|> soft switch (the 3.6/35B template honours it in SYSTEM or message content; the 3.8
+#     templates treat it as literal text)                                   -> stripped from every message
+FORCE_THINKING = os.environ.get("FORCE_THINKING", "1").strip().lower() not in ("0", "false", "no", "off", "")
+_REFFORT_KEEP = {"low", "medium", "high", "xhigh"}   # thinking-ON effort levels the 3.8 template accepts
+_THINK_OFF = "<|think_off|>"
+
 # Read timeout: generous, but FINITE.
 #
 # This was read=None, for a good reason - a cold model swap pages ~21 GB off disk and can take
@@ -96,6 +110,70 @@ def _maybe_inject_system(payload: dict) -> None:
         msgs.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
 
+def _strip_think_off(payload: dict) -> bool:
+    """Remove the <|think_off|> soft switch from EVERY message's text (string content or text parts of a
+    list). The 35B template honours it in system AND message content and clients put it in the system
+    message, so stripping only the last user turn would not force thinking. Returns True if any was removed."""
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list):
+        return False
+    hit = False
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str) and _THINK_OFF in c:
+            m["content"] = c.replace(_THINK_OFF, ""); hit = True
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and isinstance(part.get("text"), str) and _THINK_OFF in part["text"]:
+                    part["text"] = part["text"].replace(_THINK_OFF, ""); hit = True
+    return hit
+
+
+def _force_thinking(payload: dict) -> list:
+    """Force thinking ON (behind FORCE_THINKING). Returns a list of change tags (empty => nothing flipped).
+    Only neutralizes EXPLICIT disables; a request with no thinking controls is left untouched (the templates
+    default to thinking-on). Never lowers max_tokens (the caller applies the per-model floor on a flip)."""
+    if not FORCE_THINKING:
+        return []
+    changed = []
+    ctk = payload.get("chat_template_kwargs")
+    # 1. chat_template_kwargs.enable_thinking=false -> true
+    if isinstance(ctk, dict) and ctk.get("enable_thinking") is False:
+        ctk["enable_thinking"] = True
+        changed.append("chat_template_kwargs.enable_thinking false->true")
+    # 2. top-level enable_thinking=false -> drop (non-standard "equivalent")
+    if payload.get("enable_thinking") is False:
+        payload.pop("enable_thinking", None)
+        changed.append("top-level enable_thinking:false dropped")
+    # 3. reasoning_effort: a disabling/invalid value (e.g. "none") -> "low"; keep low/medium/high/xhigh
+    def _fix_reff(d, label):
+        v = d.get("reasoning_effort")
+        if isinstance(v, str) and v.strip().lower() not in _REFFORT_KEEP:
+            d["reasoning_effort"] = "low"; changed.append(f"{label} reasoning_effort {v!r}->low")
+    _fix_reff(payload, "top-level")
+    if isinstance(ctk, dict):
+        _fix_reff(ctk, "chat_template_kwargs")
+    # 4. <|think_off|> soft switch -> stripped everywhere
+    if _strip_think_off(payload):
+        changed.append("stripped <|think_off|>")
+    return changed
+
+
+def _floor_max_tokens(payload: dict, floor: int):
+    """Raise max_tokens / max_completion_tokens to `floor` if present and below it; NEVER lower a client
+    value, never add the key when absent. Returns (key, old, new) for the raised key, else None."""
+    if floor <= 0:
+        return None
+    raised = None
+    for key in ("max_tokens", "max_completion_tokens"):
+        v = payload.get(key)
+        if isinstance(v, int) and 0 < v < floor:
+            payload[key] = floor; raised = (key, v, floor)
+    return raised
+
+
 async def _forward(request, body: bytes, streaming_hint: bool):
     url = SWAP_BACKEND + request.url.path
     if request.url.query:
@@ -140,6 +218,14 @@ async def chat(request):
         if bumped:
             print(f"[router] tools present: raised {bumped[0]} {bumped[1]} -> {bumped[2]} "
                   f"(avoid tool-call truncation)", flush=True)
+        flips = _force_thinking(payload)
+        if flips:
+            # thinking was forced on -> give it room: raise max_tokens to the per-model floor (same floors
+            # as the tool guard: 512 for 27B/35B, 4096 for flash-next). Never lower a client value.
+            raised = _floor_max_tokens(payload, TOOL_MIN_BY_MODEL.get(payload.get("model"), TOOL_MIN_TOKENS))
+            print(f"[router] FORCE_THINKING {payload.get('model')}: {'; '.join(flips)}"
+                  + (f"; raised {raised[0]} {raised[1]}->{raised[2]}" if raised
+                     else "; max_tokens left as-is"), flush=True)
         body = json.dumps(payload).encode()   # `model` passes through untouched — it is the swap key
     stream = bool(payload.get("stream"))
     return await _forward(request, body, stream)

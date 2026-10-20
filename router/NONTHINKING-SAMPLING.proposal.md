@@ -1,3 +1,7 @@
+> **SUPERSEDED (2026-10-20) — NOT adopted.** The router now **forces thinking ON for every chat request**
+> (`FORCE_THINKING` in `proxy.py`; see SWITCHOVER-LOG / commit). The non-thinking path never reaches a model,
+> so this non-thinking sampling profile is moot. Kept for the record only.
+
 # Proposal (NOT applied): router non-thinking sampling profile for the 3.8 entries
 
 **What:** when a request to a **Qwen3.8 entry** (27B, flash-next, flash-next-batch) **explicitly disables
