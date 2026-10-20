@@ -48,7 +48,7 @@ ids=$(curl -sf -m5 http://127.0.0.1:8000/v1/models | jq -r '.data[].id' 2>/dev/n
 echo "  $(echo "$ids" | paste -sd, -)"
 # grep -qx (whole-line exact), NOT -q (substring): keeps a longer id from masking a shorter one
 # (e.g. a hypothetical 'qwen-38' substring of 'qwen-38-27b'). Match exact ids, newline-separated.
-for m in qwen-38-27b qwen-35b qwen-38-flash-next; do
+for m in qwen-38-27b qwen-35b qwen-38-flash-next qwen-38-flash-next-batch; do
   echo "$ids" | grep -qx "$m" || { echo "  !! missing model: $m"; fail=1; }
 done
 

@@ -6,7 +6,7 @@ from a single host; there is no cloud dependency and no API key check, so the ro
 ```
 client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server (one at a time)
            (tool guard,        (model manager:      (the actual model,
-            system prompt,       load / swap /        MTP + q8_0 KV,
+            system prompt,       load / swap /        MTP+q8_0 KV on 27B/35B,
             /load /unload)       mutual exclusion)    131072 ctx)
 ```
 
@@ -23,7 +23,7 @@ client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server 
 |---|---|---|---|---|---|
 | `qwen-38-27b` | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` | 27B dense **+ VISION** (Qwen3.8, qwen3_5 arch), GPU0+GPU1 — profiles: **UD-Q6_K_M** `-ts 4,1`/n5 or **plain Q6_K** `-ts 3,1`/n4 | UD ~69 code / 57 RAG@32K / 37 @100K · plain ~+8% | ~15–20 s | UD: GPU0 22.7 / GPU1 8.9 · plain: GPU0 21.8 / GPU1 9.4 GiB |
 | `qwen-35b` | `qwen36-35b` | 35B-A3B **MoE**, GPU0+GPU1 | **~206 t/s** | ~16–25 s | GPU0 ~21.4 / GPU1 ~3.0 GiB |
-| `qwen-38-flash-next` | `flash-next`, `qwen38-next` | 125B-A6B **MoE + VISION** (Qwen3.8-Flash-Next, qwen4exp; PLE on NVMe, MTP) | ~18.8 t/s (15.3 @100K) | ⚠️ **~150 s cold** | GPU0 ~22 / GPU1 ~15 GiB + ~34 GiB mmap |
+| `qwen-38-flash-next` | `flash-next`, `qwen38-next` | 125B-A6B **MoE + VISION** (Qwen3.8-Flash-Next, qwen4exp; PLE on NVMe, **MTP off**) | ~17–18 t/s · ~820 t/s 100K-prefill | ⚠️ **~150 s cold** | GPU0 ~23 / GPU1 ~14 GiB + ~34 GiB mmap |
 
 You may address a model by **id or alias** everywhere (`model` field, `/load`, `/upstream`).
 
@@ -35,8 +35,10 @@ swap in — batch its work, don't interleave it turn-by-turn**) · `qwen-38-27b`
 **Vision:** `qwen-38-27b` **and `qwen-38-flash-next`** accept OpenAI `image_url` content parts (data-URI or
 http URL) — images and video. `qwen-35b` is text-only. See "Vision requests" below.
 
-All: **131072 context**, **MTP speculative decoding on**, thinking on. **q8_0 KV** (locked) on the 27B/35B;
-**Flash-Next uses f16 KV** (q8_0 asserts on its QSA path).
+All: **131072 context**, thinking on. The 27B/35B use **MTP speculative decoding** + **q8_0 KV** (locked).
+**Flash-Next runs MTP OFF** (its decode is CPU-compute-bound — speculation ~triples CPU expert work for
+no net gain; dropping it frees ~4 GiB on GPU1 for `-ub 3072`) and **f16 KV** (q8_0 asserts on its QSA
+path). It uses the mainline llama.cpp build, `-t 16`, and `-ctxcp 8` context checkpoints.
 
 ---
 
@@ -128,13 +130,13 @@ is resident whenever the 27B is loaded — no separate model or endpoint.
 - **Set the proxy/client read timeout to `None`/infinite.** The router already does; a cold swap or a
   100K-token generation legitimately runs for minutes. Connect timeout ~10 s is fine.
 
-**Throughput (decode, tokens/s, MTP on)**
+**Throughput (decode, tokens/s; MTP on for the 27B/35B, OFF for Flash-Next)**
 | model | code (short) | RAG@32K | @100K ctx | @244K ctx |
 |---|---|---|---|---|
 | qwen-38-27b **UD-Q6_K_M** (`4,1`/n5, +vision) | ~69 | ~57 | ~37 | ~26 |
 | qwen-38-27b **plain Q6_K** (`3,1`/n4, +vision) | ~77 | ~50 | ~48 | — |
 | qwen-35b | ~206 | — | — | — |
-| qwen-38-flash-next | ~18.8 | — | ~15.3 | — |
+| qwen-38-flash-next (MTP off, f16, `-ub 3072`, `-t 16`) | ~17–18 | — | ~13–14 | — |
 
 Two 27B quant profiles (toggle via `swap/config.yaml.q6km` / `.plain`): **UD-Q6_K_M** is imatrix
 (quality) but ~8–10% slower — intrinsic to the mixed-bit-width dequant, *not* a split artifact (re-tuning
@@ -146,6 +148,14 @@ MTP draft acceptance on the 27B code path measured **0.83–0.89, AL 4.3–5.0**
 Speed is content-dependent because of MTP: high draft acceptance (code, acc ~0.83–0.89) runs ~2× faster
 than low-acceptance creative text (acc ~0.35). Decode also halves from short → 244K ctx (growing KV read).
 Prompt-processing (prefill) is separate and far faster (~1.1–1.2K t/s at 100K).
+
+**Flash-Next is the exception** — it runs **MTP off**, so its decode is content-*independent* (~17–18 t/s
+regardless of acceptance; speculation was a net loss on this CPU-compute-bound expert path). Dropping MTP
+freed ~4 GiB on GPU1 for a big prefill ubatch (`-ub 3072`): **100K prefill ~820 t/s** (~4× the old-fork
+MTP-on config). `-t 16` leaves the persistent CPU embedder its 8 cores (16+8=24); `-t 24` collapses to
+~5 t/s under concurrent embedding. `-ctxcp 8` reuses one prefilled long context across turns (~1.1 GiB RSS).
+A max-resolution image after a ~100K text context still leaves ~614 MiB free on GPU0 (above the 512 floor),
+so the `TS=40,8` split holds for vision.
 
 **Max context:** native 262144 is reachable only at `TS=2,1` (razor-thin, <1 GiB/GPU free; deep-needle-verified);
 `3,1`/`4,1` cap ~180K. Safe ≥1 GiB/GPU ≈ 235–245K @ `2,1`.
@@ -163,9 +173,11 @@ Prompt-processing (prefill) is separate and far faster (~1.1–1.2K t/s at 100K)
   while the former is empty if you under-budgeted.
 
 **Concurrency**
-- **One model resident at a time; one request at a time** (`--parallel 1`, required by MTP). Concurrent
+- **One model resident at a time; one request at a time** (`--parallel 1` on the interactive entries;
+  MTP requires it on the 27B/35B, and the Flash-Next main entry keeps it for latency). Concurrent
   requests **queue** — they are serialized, not run in parallel. Design clients accordingly (a burst of
-  N calls takes ~N× a single call, plus a swap if they target different models).
+  N calls takes ~N× a single call, plus a swap if they target different models). For throughput, use the
+  **`qwen-38-flash-next-batch`** entry (`--parallel 4`, MTP off, text-only).
 - Cross-model calls interleaved from multiple clients will **thrash the swap** (evict/reload each time).
   Batch by model, or pin one model for a workload.
 

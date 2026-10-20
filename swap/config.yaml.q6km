@@ -1,13 +1,13 @@
 # llama-swap v240 config — PROFILE: Q6_K_M (UD imatrix, quality). Toggle with config.yaml.plain.
 # CHAT models are MUTUALLY EXCLUSIVE — one on the GPUs at a time (27B dense+vision, 35B, 35B-batch,
-# 122B tri-tier, flash-next 125B) + the on-demand GPU embedder. The CPU embedder is concurrent/persistent.
+# flash-next 125B + batch) + the on-demand GPU embedder. The CPU embedder is concurrent/persistent.
 #
 # SCHEMA NOTE (verified against config.example.yaml @ tag v240, not from memory):
 #   `groups` is NOT top-level any more — it moved under routing.router.settings.groups.
 #
 # WHY ONE GROUP CONTAINING ALL: swap:true = only one member runs at a time; exclusive:true =
-# loading a member unloads every other group. The 27B, 35B, 122B each need both GPUs (the 122B
-# also ~15 GiB RAM); no two can coexist, so they must share ONE swap:true group.
+# loading a member unloads every other group. The 27B, 35B, flash-next each need both GPUs (flash-next
+# also ~34 GiB RAM/mmap); no two can coexist, so they must share ONE swap:true group.
 #
 # WHY cmd POINTS AT THE RUN SCRIPT: it encodes every hard-won flag (layer split, q8_0 KV, mmproj,
 # MTP). The script `exec`s the binary, so the PID llama-swap tracks IS llama-server (SIGTERM
@@ -100,19 +100,23 @@ models:
       - "embed-gpu"
       - "qwen3-embed-gpu"
 
-  # QWEN3.8-FLASH-NEXT — qwen4exp 125B-A6B multimodal MoE + 51.2B-elem PLE + MTP draft head.
-  # ISOLATED binary at ~/ai/flashnext/llama.cpp (MTP branch d1a92352, build 10802) — NOT this stack's
-  # llama.cpp. PLE (per_layer_token_embd, 27.5 GiB IQ4_NL) is lazy-mmap on NVMe; routed experts split
-  # GPU/RAM via NCM=31; -ts 40,8 puts the expert-heavy HIGH layers on the 4090 (NCM sends LOW layers'
-  # experts to CPU, and -sm layer would otherwise pile the high end onto the 16GB 5060 Ti -> OOM).
-  # f16 KV (q8_0 asserts on the QSA path). --no-warmup = fast swap-in (first request faults lazily).
+  # QWEN3.8-FLASH-NEXT — qwen4exp 125B-A6B multimodal MoE + 51.2B-elem PLE.
+  # MAINLINE binary at ~/ai/flashnext-main/llama.cpp (build 11736, self-contained MTP head) — NOT this
+  # stack's llama.cpp, and NOT the old fork (~/ai/flashnext, kept for rollback). PLE (per_layer_token_embd,
+  # 27.5 GiB IQ4_NL) is lazy-mmap on NVMe; routed experts split GPU/RAM via NCM=31; -ts 40,8 puts the
+  # expert-heavy HIGH layers on the 4090 (NCM sends LOW layers' experts to CPU, and -sm layer would
+  # otherwise pile the high end onto the 16GB 5060 Ti -> OOM). f16 KV (q8_0 asserts on the QSA path).
+  # MTP OFF (round 2): decode is CPU-compute-bound, so the draft ~triples CPU expert work for no net
+  # gain, and dropping it frees ~4 GiB on GPU1 for a bigger -ub (3072, ~4x faster 100K prefill). -t 16
+  # leaves the persistent CPU embedder its 8 cores (16+8=24); -t 24 collapses to ~5 t/s under concurrent
+  # embed. -ctxcp 8 reuses a prefilled long context across turns. --no-warmup = fast swap-in.
   # gpu-exclusive member: loading it evicts the chat model; the next chat request evicts it back.
   "qwen-38-flash-next":
     name: "Qwen3.8-Flash-Next (qwen4exp 125B-A6B MoE+PLE+MTP, 4090+5060Ti+RAM)"
-    description: "125B-A6B multimodal MoE; PLE lazy-mmap on NVMe, MTP draft head. NCM=31 TS=40,8 f16 KV, 131072 ctx, ~18.8 t/s (MTP on)."
+    description: "125B-A6B multimodal MoE; PLE lazy-mmap on NVMe. MTP OFF (CPU-compute-bound). f16 KV, NCM=31 TS=40,8, -ub 3072, -t 16, -ctxcp 8, 131072 ctx. ~17-18 t/s decode, ~820 t/s P-100K prefill."
     cmd: >-
-      env NO_WARMUP=1 NCM=31 TS=40,8 MG=0 CTX=131072 NMAX=2 VISION=on PORT=8085
-      /home/rohit/ai/flashnext/run-38-flash-next.sh
+      env SPEC_OFF=1 KVK=f16 KVV=f16 UB=3072 T=16 CKPT=8 NO_WARMUP=1 NCM=31 TS=40,8 MG=0 CTX=131072 VISION=on PORT=8085
+      /home/rohit/ai/flashnext-main/run-38-flash-next-main.sh
     proxy: http://127.0.0.1:8085
     checkEndpoint: /health
     ttl: 0
@@ -131,10 +135,10 @@ models:
   # TS=40,8 OOMs GPU0 — the freed VRAM is on GPU1, reached only by lowering the split; NCM=26 here would be tighter.)
   "qwen-38-flash-next-batch":
     name: "Qwen3.8-Flash-Next — batch (4 slots x 32k, MTP off, text-only)"
-    description: "Same 125B GGUF/placement as qwen-38-flash-next with -np 4, MTP off, vision off. Bulk throughput (indexing/scoring): amortizes the CPU expert reads across concurrent sequences. Per-slot ctx 32768."
+    description: "Same 125B GGUF/placement as qwen-38-flash-next with -np 4, MTP off, vision off, q8_0 KV. Bulk throughput (indexing/scoring): amortizes the CPU expert reads across concurrent sequences; ~+20% aggregate @8-concurrent, ~640 t/s P-8K. -t 16 (same CPU-embed contention rule). Per-slot ctx 32768."
     cmd: >-
-      env NP=4 SPEC_OFF=1 VISION=off NO_WARMUP=1 NCM=28 TS=37,11 MG=0 CTX=131072 PORT=8089
-      /home/rohit/ai/flashnext/run-38-flash-next.sh
+      env NP=4 SPEC_OFF=1 VISION=off KVK=q8_0 KVV=q8_0 UB=2048 T=16 CKPT=8 NO_WARMUP=1 NCM=28 TS=37,11 MG=0 CTX=131072 PORT=8089
+      /home/rohit/ai/flashnext-main/run-38-flash-next-main.sh
     proxy: http://127.0.0.1:8089
     checkEndpoint: /health
     ttl: 0

@@ -49,14 +49,18 @@ echo "################ Qwen regression (27B) ################"
 # and NOTHING noticed, because nothing asserted the mapping. This closes that hole in BOTH
 # directions: a model with no gate fails, and a gate for a model that no longer exists fails.
 echo "[0] every model has a live gate"
+# A value may carry a leading `VAR=val ` env prefix that is applied when the gate is RUN (Phase 2 /
+# m3-driver); [0] validates only the script path (the last whitespace-separated token). EXPECT_MTP=0
+# tells gates38next.sh the entry runs MTP off, so it SKIPs the draft gates (#5/#9) but still FAILs if
+# the server is unexpectedly drafting — see gates38next.sh's [M] state check.
 declare -A GATE_FOR=(
   [qwen-38-27b]="gates38.sh"  # Qwen3.8-27B dense+vision (dual-GPU layer split) — deep direct-backend gate
   [qwen-35b]="gates35.sh"
   [qwen-35b-batch]="gates35.sh"  # -np 4 batch variant (signalpost SCORE) — same GGUF/placement, same gate
   [qwen-embed]="gates-embed.sh"  # Qwen3-Embedding-0.6B (CPU, concurrent) — /v1/embeddings shape+semantics
   [qwen-embed-gpu]="gates-embed.sh"  # same model on the 4090 (on-demand heavy) — same shape/semantics gate
-  [qwen-38-flash-next]="../flashnext/gates38next.sh"  # qwen4exp 125B; gate lives in the ISOLATED tree ($HERE/../flashnext)
-  [qwen-38-flash-next-batch]="../flashnext/gates38next.sh"  # same GGUF/placement (-np 4, MTP-off, text-only); same gate
+  [qwen-38-flash-next]="EXPECT_MTP=0 ../flashnext/gates38next.sh"  # qwen4exp 125B, MTP OFF (round 2); gate in $HERE/../flashnext
+  [qwen-38-flash-next-batch]="EXPECT_MTP=0 ../flashnext/gates38next.sh"  # same GGUF/placement (-np 4, MTP-off, text-only); same gate, EXPECT_MTP=0
 )
 # NB: this file (regress.sh) is the ROUTER-integration suite for the primary model; gates38.sh is its
 # mapped deep gate (analogous to gates35/gates122). Both are run; [0] only needs each model to map to one.
@@ -67,10 +71,11 @@ else
   # direction 1: every registered model must have a gate file that exists and is executable
   for m in $ids; do
     g="${GATE_FOR[$m]:-}"
+    gpath="${g##* }"   # strip any leading VAR=val env tokens -> the gate script path
     if [ -z "$g" ]; then
       no "model '$m' is registered but has NO gate suite (add one to GATE_FOR)"
-    elif [ ! -x "$HERE/$g" ]; then
-      no "model '$m' maps to '$g' but it is missing or not executable"
+    elif [ ! -x "$HERE/$gpath" ]; then
+      no "model '$m' maps to '$g' but '$gpath' is missing or not executable"
     else
       ok "model '$m' -> $g (present, executable)"
     fi

@@ -13,7 +13,8 @@ chat model is loaded (zero VRAM). The **GPU embedder** (`qwen-embed-gpu`) is a c
 | `qwen-38-27b` | **27B dense + VISION** (Qwen3.8), 4090+5060Ti — **two quant profiles** (see below) | UD-Q6_K_M ~69 code · 57 RAG@32K · 37 @100K · plain Q6_K ~+8% ← quality dense, **sees images/video** | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` |
 | `qwen-35b` | 35B MoE, 4090+5060Ti | **206 t/s** ← the fast one | `qwen36-35b` |
 | `qwen-35b-batch` | 35B MoE, **4 parallel slots × 32k ctx** — for many small concurrent requests (classification/scoring) | same GGUF as `qwen-35b`, throughput not latency | `qwen36-35b-batch` |
-| `qwen-38-flash-next` | **125B MoE + VISION** (Qwen3.8-Flash-Next), 4090+5060Ti+RAM (PLE on NVMe) | ~18.8 t/s ← biggest · ⚠️ ~150 s cold swap | `flash-next`, `qwen38-next` |
+| `qwen-38-flash-next` | **125B MoE + VISION** (Qwen3.8-Flash-Next), 4090+5060Ti+RAM (PLE on NVMe); **MTP off, f16 KV, mainline build** | ~17–18 t/s decode · ~820 t/s 100K-prefill ← biggest · ⚠️ ~150 s cold swap | `flash-next`, `qwen38-next` |
+| `qwen-38-flash-next-batch` | same 125B, **4 parallel slots × 32k ctx**, MTP off, text-only, q8_0 KV — bulk indexing/scoring | ~+20% aggregate @8-concurrent, ~640 t/s P-8K | `flash-next-batch`, `qwen38-next-batch` |
 | `qwen-embed` | **Qwen3-Embedding-0.6B**, CPU, **always-on/concurrent** — light query embeds during chat | 1024-dim, zero VRAM | `embed`, `qwen3-embed` |
 | `qwen-embed-gpu` | **same embedder on the 4090**, on-demand — **heavy bulk indexing** (evicts the chat model while it runs) | 1024-dim, full 1008 GB/s | `embed-gpu`, `qwen3-embed-gpu` |
 
@@ -192,9 +193,9 @@ curl -s -X POST localhost:9000/api/models/unload
 ~/ai/qwen36/run-text-35b.sh &            # port 8082
 ~/ai/qwen36/gates35.sh ; kill %1
 
-# flash-next (125B, ISOLATED binary at ~/ai/flashnext) — gate via the loaded llama-swap backend (:8085):
+# flash-next (125B, MAINLINE binary at ~/ai/flashnext-main; old fork ~/ai/flashnext kept for rollback):
 curl -s localhost:8000/load/flash-next                        # ~150 s cold load
-~/ai/flashnext/gates38next.sh                                 # single-server gates (needs jq); MTP-identity/q8_0/perplexity are separate
+EXPECT_MTP=0 ~/ai/flashnext/gates38next.sh                    # single-server gates (needs jq). EXPECT_MTP=0 (MTP off): SKIPs the draft gates #5/#9, FAILs if the server is unexpectedly drafting. Expect 14 PASS / 1 FAIL (reasoning_effort) / 2 SKIP
 
 # embedders (both hit /v1/embeddings directly — the CPU one on :8086, GPU one on :8088)
 ~/ai/qwen36/gates-embed.sh                                        # CPU qwen-embed  (:8086)
@@ -202,8 +203,10 @@ NGL=99 DEV=0 PORT=8088 ~/ai/qwen36/run-embed.sh &                 # GPU on the 4
 M=qwen-embed-gpu ~/ai/qwen36/gates-embed.sh http://127.0.0.1:8088 ; kill %1
 ```
 `regress.sh [0]` asserts **every registered model has a live gate**, in both directions — add a
-model without a `GATE_FOR` entry and it fails immediately. The stack currently registers **6 models**
-(`qwen-38-27b`, `qwen-35b`, `qwen-35b-batch`, `qwen-38-flash-next`, `qwen-embed`, `qwen-embed-gpu`), each mapped.
+model without a `GATE_FOR` entry and it fails immediately. The stack currently registers **7 models**
+(`qwen-38-27b`, `qwen-35b`, `qwen-35b-batch`, `qwen-38-flash-next`, `qwen-38-flash-next-batch`,
+`qwen-embed`, `qwen-embed-gpu`), each mapped (the two flash-next entries map to `gates38next.sh` with
+`EXPECT_MTP=0`).
 
 ---
 
@@ -216,17 +219,38 @@ model without a `GATE_FOR` entry and it fails immediately. The stack currently r
 | `VISION` (3.8) | on | `off` drops `--mmproj` (text-only, frees the projector VRAM). MTP drafting and vision coexist (gate-verified) — no need to disable MTP for images. |
 | `SPEC_NMAX` (27B/3.8) | 4 (plain) · **5 (UD)** | code/RAG lever. On UD, `5` = **+14% RAG@32K** (AL 4.3→5.0) at −0.7% short; `6` helps RAG only +1 and hurts short. Fits GPU0 with vision. |
 | `SPEC_NMAX` (35B) | 3 | `4` is **+12% on RAG**, −12% creative. Try if your work is RAG-heavy. |
-| `NMAX` (flash-next) | 2 | MTP draft depth (`--spec-draft-n-max`). 2 is unsloth's default; acceptance measured 0.6–0.9. Try 3 if RAG-heavy — full sweep pending (M5). GPU1 headroom is ~1 GiB, so watch for OOM when raising. |
-| `NCM` / `TS` (flash-next) | 31 · 40,8 | `--n-cpu-moe` (experts to CPU) + tensor-split. **`TS=40,8` is load-bearing**: NCM offloads LOW layers' experts, `-sm layer` puts HIGH layers on GPU1, so the expert-heavy end must be steered to the 4090 or GPU1 OOMs. |
-| `MTP` | on | `off` if you ever see repetition. Costs ~1.5× speed. |
+| `NCM` / `TS` (flash-next) | 31 · 40,8 | `--n-cpu-moe` (experts to CPU) + tensor-split. **`TS=40,8` is load-bearing**: NCM offloads LOW layers' experts, `-sm layer` puts HIGH layers on GPU1, so the expert-heavy end must be steered to the 4090 or GPU1 OOMs. A max-res image after 100K text still leaves ~614 MiB free on GPU0 (>512 floor), so `40,8` holds for vision. |
+| `SPEC_OFF` / `MTP` (flash-next) | **off = `SPEC_OFF=1`** (round 2) | Flash-Next ships **MTP OFF**. Decode is CPU-compute-bound, so the draft ~triples CPU expert work for no net gain; dropping it also frees ~4 GiB on GPU1 for `-ub 3072`. (The 27B/35B keep MTP on, a ~1.5–2× win there.) Re-enable only if you have a reason: unset `SPEC_OFF` and set `NMAX`. |
+| `UB` / `T` / `CKPT` (flash-next) | **3072 · 16 · 8** | `UB=3072` = big prefill ubatch (~4× faster 100K prefill, ~820 t/s). **`T=16`** leaves the persistent CPU embedder its 8 cores (16+8=24 physical); `T=24` collapses to ~5 t/s under concurrent embedding, ~18→17.9 even under light query load. `CKPT=8` (`-ctxcp`) reuses a prefilled long context across turns (~1.1 GiB RSS). |
+| `MTP` (27B/35B) | on | `off` if you ever see repetition. Costs ~1.5× speed on those models. |
 | `CTX` | 131072 | max usable is the model's native **262144**, but only at `TS=2,1` (razor-thin: <1 GiB/GPU free; deep-needle-verified). `3,1`/`4,1` cap ~180K (GPU0 OOMs at 262144). Safe ≥1 GiB/GPU max ≈ 235–245K @ `2,1`. |
 | `NP` (35B) | 1 · **4 (`qwen-35b-batch`)** | parallel slots. `-c` is TOTAL ctx split across slots, so `NP=4` = 32768/slot (VRAM-neutral). Raise for many small concurrent requests; leave at 1 for full-context chat. |
 | `NGL` / `DEV` (embedder) | `0` (CPU) | `NGL=99` puts the embedder on GPU (`DEV=0` 4090, `DEV=1` 5060 Ti). The `qwen-embed-gpu` model sets `NGL=99 DEV=0 PORT=8088`. GPU embed uses ~7.4 GiB (8192 batch buffer) and swaps the chat model out — on-demand only. |
 | `TOOL_MIN_BY_MODEL` (router) | flash-next: 4096 | raise if a model's tool calls truncate |
 
 **KV stays q8_0 on the 27B/35B. Locked.** q4_0 saves ~1.75 GiB and silently breaks long-range
-retrieval (2/5 vs 5/5 needles) — it benchmarks fine and guts the RAG path. (**Flash-Next is the one
-exception — f16 KV**, since q8_0 asserts on its QSA path; q8_0 is verified clean on our build if ever needed.)
+retrieval (2/5 vs 5/5 needles) — it benchmarks fine and guts the RAG path. (**Flash-Next's main entry is
+f16 KV**, since q8_0 asserts on its QSA path; q8_0 is verified clean on our build and is what the
+`-batch` entry uses.)
+
+### Flash-Next rollback (config-only, no rebuild)
+Round 2 repointed the two flash-next entries to the **mainline build** (`~/ai/flashnext-main`) with the
+**MTP-off** config. The old MTP-on **fork is untouched** at `~/ai/flashnext` (launcher
+`run-38-flash-next.sh`, its own `llama.cpp`). To roll back — no rebuild, no model re-download:
+
+```bash
+cd ~/ai/qwen36/swap
+git checkout HEAD~1 -- config.yaml config.yaml.q6km config.yaml.plain   # restore the pre-round-2 cmds
+# …or hand-edit both flash-next cmds back to the old-fork launcher:
+#   main:  env NO_WARMUP=1 NCM=31 TS=40,8 MG=0 CTX=131072 NMAX=2 VISION=on PORT=8085
+#          /home/rohit/ai/flashnext/run-38-flash-next.sh
+#   batch: env NP=4 SPEC_OFF=1 VISION=off NO_WARMUP=1 NCM=28 TS=37,11 MG=0 CTX=131072 PORT=8089
+#          /home/rohit/ai/flashnext/run-38-flash-next.sh
+sudo systemctl restart qwen-swap qwen-router
+curl -s localhost:8000/load/flash-next && EXPECT_MTP=1 ~/ai/flashnext/gates38next.sh   # MTP-ON gate
+```
+The gate is `EXPECT_MTP`-aware: on the rolled-back (MTP-on) config run it with **`EXPECT_MTP=1`** — it
+then *requires* the server to be drafting and runs the draft gates instead of skipping them.
 
 ---
 

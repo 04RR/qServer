@@ -9,10 +9,13 @@ loaded on demand by name.
 |---|---|---|---|
 | 27B dense **+ vision** (Qwen3.8), 2 quant profiles | `qwen-38-27b` (`qwen38`, `qwen36`, `qwen36-q6`) | 4090 + 5060 Ti | UD-Q6_K_M ~69 code · 57 RAG@32K · plain Q6_K ~+8% |
 | 35B-A3B MoE | `qwen-35b` (`qwen36-35b`) | 4090 + 5060 Ti | ~206 t/s |
-| 125B-A6B MoE **+ vision** (Qwen3.8-Flash-Next) | `qwen-38-flash-next` (`flash-next`, `qwen38-next`) | 4090 + 5060 Ti + RAM (PLE on NVMe) | ~18.8 t/s · ⚠️ **~150 s cold swap-in — batch its work** |
+| 125B-A6B MoE **+ vision** (Qwen3.8-Flash-Next) | `qwen-38-flash-next` (`flash-next`, `qwen38-next`) | 4090 + 5060 Ti + RAM (PLE on NVMe) | ~17–18 t/s · ~820 t/s 100K-prefill · ⚠️ **~150 s cold swap-in — batch its work** |
 
-All: 131072 context, MTP speculative decoding, thinking on (q8_0 KV — **except Flash-Next, which uses f16**;
-q8_0 asserts on its QSA path). The 27B **and Flash-Next** are native **vision-language** models (images +
+All: 131072 context, thinking on. The 27B/35B use **MTP speculative decoding** + **q8_0 KV**;
+**Flash-Next runs MTP OFF and f16 KV** — its decode is CPU-compute-bound, so speculation ~triples the
+CPU expert work for no net gain, and dropping it frees ~4 GiB on GPU1 for a bigger prefill ubatch
+(`-ub 3072`, ~4× faster 100K prefill). It runs on the **mainline llama.cpp** build (`~/ai/flashnext-main`),
+`-t 16` (leaves the CPU embedder its cores), and `-ctxcp 8` context checkpoints. The 27B **and Flash-Next** are native **vision-language** models (images +
 video). The 27B replaced the retired 3.6-27B dense line (Q4 + Q6); its legacy aliases (`qwen36`,
 `qwen36-q6`, `qwen36-text`) carry forward so existing clients keep working.
 The 27B has **two swappable quant profiles** — `UD-Q6_K_M` (imatrix, quality; `-ts 4,1`/MTP `n=5`) and

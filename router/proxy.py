@@ -4,16 +4,16 @@ Qwen3.6 router — one OpenAI-compatible endpoint on :8000.
 
   client -> router :8000 (tool-budget guard, system-prompt injection) -> llama-swap :9000 -> llama-server
 
-WHY THIS STILL EXISTS NOW THAT VISION IS RETIRED:
-The image-content routing is gone (vision retired; both GPUs now serve one text model at a time),
-so the only remaining job is the tool-budget guard -- and llama-swap CANNOT express it. Its
+WHY THIS ROUTER EXISTS (vision is NOT retired — the 27B and flash-next are multimodal):
+Model routing, image requests included, is llama-swap's job: we pass `model` through untouched (it is
+the swap key), so a multimodal model receives image content unchanged. The router's own job is the two
+things llama-swap CANNOT express: the tool-budget guard and system-prompt injection. llama-swap's
 `filters.setParams` is an unconditional set ("always runs for the model"), not a floor, and it
 cannot condition on `tools` being present. Configuring max_tokens=512 there would cap EVERY
 request at 512 tokens, truncating long code generation and 100K RAG answers. The guard needs
     IF tools present AND max_tokens < floor THEN raise to floor
 which is conditional logic on the request body. Hence the chain. See regression test #13.
 
-Model routing is llama-swap's job: we pass `model` through untouched (it is the swap key).
 Aliases ("qwen36"/"qwen38" -> qwen-38-27b, "qwen36-35b" -> qwen-35b) are configured in swap/config.yaml.
 
 Deps: starlette, uvicorn, httpx (installed into router/.venv by setup.sh via uv).
@@ -103,6 +103,11 @@ async def _forward(request, body: bytes, streaming_hint: bool):
     # drop hop-by-hop headers
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
+    # Force identity encoding upstream. We forward resp.aiter_raw() (undecoded) and strip
+    # content-encoding below, so the upstream must NOT compress. Merely dropping the client's
+    # accept-encoding is not enough: httpx then auto-adds its own "gzip, deflate", the backend
+    # compresses, and the client receives gzipped bytes with no content-encoding header to decode.
+    headers["accept-encoding"] = "identity"
     req = CLIENT.build_request(request.method, url, headers=headers, content=body)
     resp = await CLIENT.send(req, stream=True)
     resp_headers = {k: v for k, v in resp.headers.items()

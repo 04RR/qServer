@@ -35,7 +35,7 @@ Send one of these as the `model` field. Any alias in the last column works too.
 | `qwen-38-27b` | **27B dense + VISION** (Qwen3.8), runs on both GPUs | ~69 tok/s code · 57 @32K · 37 @100K | code, RAG, **anything with images/video** | `qwen38`, `qwen38-27b`, `qwen36`, `qwen36-q6`, `qwen36-text` |
 | `qwen-35b` | 35B MoE (mixture-of-experts) | **~206 tok/s** — the fast one | fast general chat, high-throughput text | `qwen36-35b` |
 | `qwen-35b-batch` | same 35B, **4 parallel slots × 32K ctx** | throughput, not latency | **many small requests at once** (classification, scoring) | `qwen36-35b-batch` |
-| `qwen-38-flash-next` | **125B MoE + VISION** (Qwen3.8-Flash-Next), GPUs + RAM (PLE on NVMe) | ~18.8 tok/s — the biggest · ⚠️ **~150 s cold swap-in** | hardest reasoning, quality, images/video | `flash-next`, `qwen38-next` |
+| `qwen-38-flash-next` | **125B MoE + VISION** (Qwen3.8-Flash-Next), GPUs + RAM (PLE on NVMe); **MTP off, f16 KV** | ~17–18 tok/s decode · ~820 tok/s 100K-prefill — the biggest · ⚠️ **~150 s cold swap-in** | hardest reasoning, quality, images/video | `flash-next`, `qwen38-next` |
 | `qwen-embed` | **Qwen3-Embedding-0.6B** on CPU, always available | 1024-dim, zero VRAM | live query embeds while you chat | `embed`, `qwen3-embed` |
 | `qwen-embed-gpu` | same embedder on the 4090, on-demand | 1024-dim, fast | **bulk corpus indexing** (evicts the chat model while it runs) | `embed-gpu`, `qwen3-embed-gpu` |
 
