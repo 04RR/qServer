@@ -20,6 +20,7 @@
 #   draft (draft_n>0) AND an image request answers correctly. If a future llama.cpp regresses that
 #   coexistence, set MTP=off (below) to fall back to the correctness-first vision-only mode.
 set -euo pipefail
+source "$HOME/ai/qwen36/gpus.sh"   # GPU UUIDs: pin by UUID, not index
 
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
@@ -73,7 +74,7 @@ MMPROJ_ARGS=(--mmproj "$MMPROJ")
 # qwen-swap.service can stay pin-agnostic. -sm layer + -ts spread whole layers across GPU0+GPU1.
 # NOTE: no --chat-template-file — 3.8 ships its own embedded template (developer-role + improved tool
 # calling); the 3.6 v19 hand-fix does not apply. gates38.sh [4]/[5] verify thinking+tools parse.
-exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
+exec env CUDA_VISIBLE_DEVICES="$GPU_BOTH" "$BIN" \
   -m "$MODEL" \
   "${MMPROJ_ARGS[@]}" \
   --alias qwen38 \
@@ -87,4 +88,4 @@ exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \
   --presence-penalty 0.0 --repeat-penalty 1.0 \
   --seed "$SEED" \
-  --host 0.0.0.0 --port "$PORT"
+  --host 127.0.0.1 --port "$PORT"

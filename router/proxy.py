@@ -181,13 +181,38 @@ async def load_model(request):
 
 
 async def unload_model(request):
-    """Free all GPUs (symmetric with /load). Proxies llama-swap's POST /api/models/unload."""
+    """Free all GPUs (symmetric with /load). Proxies llama-swap's POST /api/models/unload.
+    Evicts EVERY model, including another client's mid-job; use /unload/<model> to free just one."""
     try:
         r = await CLIENT.post(SWAP_BACKEND + "/api/models/unload", timeout=60.0)
     except Exception as e:
         return JSONResponse({"error": f"{e.__class__.__name__}: {e}"}, status_code=504)
     return JSONResponse({"unloaded": r.status_code == 200, "upstream_status": r.status_code},
                         status_code=200 if r.status_code == 200 else 502)
+
+
+async def unload_one(request):
+    """Free ONE model (by id or alias), leaving any other client's model resident.
+
+      GET|POST /unload/qwen-35b   -> {"unloaded": "qwen-35b", "upstream_status": 200, "running": [...]}
+
+    Proxies llama-swap's POST /api/models/unload/<model>. Unloading a model that is not running is a
+    no-op 200; an unknown model is 404. Prefer this over /unload, which evicts EVERY model (including
+    another client's mid-job)."""
+    model = request.path_params["model"]
+    try:
+        r = await CLIENT.post(f"{SWAP_BACKEND}/api/models/unload/{model}", timeout=60.0)
+    except Exception as e:
+        return JSONResponse({"error": f"{e.__class__.__name__}: {e}", "model": model}, status_code=504)
+    running = []
+    try:
+        rr = await CLIENT.get(SWAP_BACKEND + "/running", timeout=5.0)
+        running = [m.get("model") for m in rr.json().get("running", [])]
+    except Exception:
+        pass
+    status = 200 if r.status_code == 200 else (404 if r.status_code == 404 else 502)
+    return JSONResponse({"unloaded": model if r.status_code == 200 else None, "upstream_status": r.status_code,
+                         "running": running}, status_code=status)
 
 
 async def passthrough(request):
@@ -224,6 +249,7 @@ routes = [
     Route("/load", load_model, methods=["GET", "POST"]),
     Route("/load/{model}", load_model, methods=["GET", "POST"]),
     Route("/unload", unload_model, methods=["GET", "POST"]),
+    Route("/unload/{model}", unload_one, methods=["GET", "POST"]),
     Route("/v1/chat/completions", chat, methods=["POST"]),
     Route("/{path:path}", passthrough, methods=["GET", "POST"]),   # catch-all LAST
 ]

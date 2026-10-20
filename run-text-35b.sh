@@ -17,6 +17,7 @@
 #   routed experts are exclusively Q4_K/Q5_K/Q6_K; every Q8_0 tensor (attn_qkv, attn_gate,
 #   ssm_out, shexp, token_embd, output) is non-expert and stays on CUDA0. The regex matching only
 #   `_exps` is what holds the gate — so verify residency at boot, don't trust the regex.
+source "$HOME/ai/qwen36/gpus.sh"   # GPU UUIDs: pin by UUID, not index
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
 
@@ -60,7 +61,7 @@ SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 # -ts 1,0 : split-mode layer with 100% weight on GPU0. This keeps BOTH CUDA backends initialized
 # (so the -ot CUDA1 target resolves) while leaving default placement entirely on the 4090.
 # `-sm none` would risk never creating the CUDA1 backend at all.
-exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
+exec env CUDA_VISIBLE_DEVICES="$GPU_BOTH" "$BIN" \
   -m "$MODEL" --alias qwen36-35b \
   -ngl "$NGL" -c "$CTX" -fa on -np "$NP" \
   -sm layer -ts "$TS" -mg 0 \
@@ -72,5 +73,5 @@ exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
   --reasoning-preserve \
   --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 \
   --presence-penalty 0.0 --repeat-penalty 1.0 \
-  --host 0.0.0.0 --port "$PORT"
+  --host 127.0.0.1 --port "$PORT"
 # NOTE: no --mmproj (vision retired). No -ot ...=CPU, no --cpu-moe/--n-cpu-moe: everything in VRAM.

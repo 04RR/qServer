@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Server B — VISION, RTX 5060 Ti (CUDA1). mmproj loaded, NO MTP. Correctness > speed.
 set -euo pipefail
+source "$HOME/ai/qwen36/gpus.sh"   # GPU UUIDs: pin by UUID, not index
 
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
@@ -16,7 +17,7 @@ CTX="${CTX:-32768}"                # 32K target; drop to 24576 if compute buffer
 KV="${KV:-q4_0}"                   # q4_0 to fit the 16 GB card
 NGL="${NGL:-99}"
 
-exec env CUDA_VISIBLE_DEVICES=1 "$BIN" \
+exec env CUDA_VISIBLE_DEVICES="$GPU_5060TI" "$BIN" \
   -m "$MODEL" \
   --mmproj "$MMPROJ" \
   --alias qwen36-vision \
@@ -27,5 +28,5 @@ exec env CUDA_VISIBLE_DEVICES=1 "$BIN" \
   --jinja --chat-template-file "$TMPL" \
   --reasoning-preserve \
   --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 \
-  --host 0.0.0.0 --port 8081
+  --host 127.0.0.1 --port 8081
 # NO --spec-type here: MTP gives no gain with vision and risks slot-position corruption/OOM (#22867/#23371).

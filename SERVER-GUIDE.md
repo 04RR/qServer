@@ -231,7 +231,10 @@ curl -s localhost:8000/v1/models | jq -r '.data[].id'
 # Pre-warm a model so the first real request is instant (blocks until it's resident)
 curl -s localhost:8000/load/flash-next | jq       # GET /load/<model or alias>  (~150 s cold — pre-warm)
 
-# Free the GPUs (unload whatever chat model is resident)
+# Unload one model (other clients' models stay loaded)
+curl -s -X POST localhost:8000/unload/qwen-35b | jq
+
+# Free the GPUs (unload every chat model, whoever loaded it)
 curl -s -X POST localhost:8000/unload | jq
 
 # Watch VRAM live
@@ -285,7 +288,8 @@ Embeddings    POST /v1/embeddings
 List models   GET  /v1/models
 Health        GET  /healthz
 Pre-warm      GET  /load/<model>
-Unload        POST /unload
+Unload one    POST /unload/<model>
+Unload all    POST /unload
 
 Chat models   qwen-38-27b   27B dense + VISION   (code/RAG/images)
               qwen-35b      35B MoE, fast        (default)

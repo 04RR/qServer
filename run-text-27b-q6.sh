@@ -11,6 +11,7 @@
 # Every other flag (ctx, q8_0 KV, flash-attn, MTP n=4, v19 template, sampling) is CARRIED UNCHANGED
 # from run-text-mtp.sh so the two 27B entries differ ONLY in quant, device span, and port.
 set -euo pipefail
+source "$HOME/ai/qwen36/gpus.sh"   # GPU UUIDs: pin by UUID, not index
 
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
@@ -41,7 +42,7 @@ SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 # comment). Leaving this one unset made it depend on an empty INHERITED env — and a future
 # Environment=CUDA_VISIBLE_DEVICES= added to the unit would silently starve it to one GPU (OOM/fail).
 # =0,1 is robust and self-documenting.
-exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
+exec env CUDA_VISIBLE_DEVICES="$GPU_BOTH" "$BIN" \
   -m "$MODEL" \
   --alias qwen36-q6 \
   -ngl "$NGL" -c "$CTX" -fa on -np 1 \
@@ -53,5 +54,5 @@ exec env CUDA_VISIBLE_DEVICES=0,1 "$BIN" \
   --reasoning-preserve \
   --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 \
   --presence-penalty 0.0 --repeat-penalty 1.0 \
-  --host 0.0.0.0 --port 8081
+  --host 127.0.0.1 --port 8081
 # chat-template: v19, same as the Q4 entry. NO --mmproj (keeps the MTP draft path accelerating).

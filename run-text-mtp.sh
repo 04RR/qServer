@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Server A — TEXT + MTP, RTX 4090 (CUDA0). Max speed, >=100K context. NO mmproj (keeps MTP alive).
 set -euo pipefail
+source "$HOME/ai/qwen36/gpus.sh"   # GPU UUIDs: pin by UUID, not index
 
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
@@ -20,7 +21,7 @@ MTP="${MTP:-on}"                    # on|off — set off to benchmark the no-spe
 SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 [ "$MTP" = "off" ] && SPEC_ARGS=(--spec-type none)
 
-exec env CUDA_VISIBLE_DEVICES=0 "$BIN" \
+exec env CUDA_VISIBLE_DEVICES="$GPU_4090" "$BIN" \
   -m "$MODEL" \
   --alias qwen36-text \
   -ngl "$NGL" -c "$CTX" -fa on -np 1 \
@@ -31,6 +32,6 @@ exec env CUDA_VISIBLE_DEVICES=0 "$BIN" \
   --reasoning-preserve \
   --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 \
   --presence-penalty 0.0 --repeat-penalty 1.0 \
-  --host 0.0.0.0 --port 8080
+  --host 127.0.0.1 --port 8080
 # NOTE: no --mmproj here — that omission is what keeps the MTP draft path accelerating.
 # chat-template-kwargs: NO space after the colon (Qwen silently ignores it otherwise).

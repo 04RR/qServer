@@ -8,4 +8,4 @@ cd "$(dirname "$0")"
 export SWAP_BACKEND="${SWAP_BACKEND:-http://127.0.0.1:9000}"
 export INJECT_SYSTEM="${INJECT_SYSTEM:-1}"
 export TOOL_MIN_TOKENS="${TOOL_MIN_TOKENS:-512}"
-exec .venv/bin/python -m uvicorn proxy:app --host 0.0.0.0 --port 8000 --no-access-log
+exec .venv/bin/python -m uvicorn proxy:app --host 127.0.0.1 --port 8000 --no-access-log

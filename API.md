@@ -1,7 +1,7 @@
 # Qwen local inference — API reference
 
 One OpenAI-compatible endpoint, several models, **one resident at a time**. Everything below is served
-from a single host; there is no cloud dependency and no API key check (bind is localhost by default).
+from a single host; there is no cloud dependency and no API key check, so the router and every llama-server bind 127.0.0.1 only.
 
 ```
 client ──▶ router :8000 ──▶ llama-swap :9000 ──▶ llama-server (one at a time)
@@ -70,12 +70,25 @@ curl -s -X POST localhost:8000/load -d '{"model":"flash-next"}'   # ~150 s cold 
 - `200` loaded · `404` unknown model (`loaded:null`) · `502/504` load failed.
 - Idempotent: loading the already-resident model returns in ~0 s.
 
+### `GET|POST /unload/<model>` — unload one model, leave the rest
+```bash
+curl -s -X POST localhost:8000/unload/qwen-35b   # by id or alias
+```
+```json
+{"unloaded":"qwen-35b","upstream_status":200,"running":["qwen-38-27b"]}
+```
+- `200` unloaded (also when that model wasn't loaded: a no-op) · `404` unknown model (`unloaded:null`) ·
+  `502/504` llama-swap failed or didn't answer.
+- **Use this from an application.** It frees only the model you name, so it can't evict a model another
+  client is in the middle of using.
+
 ### `GET|POST /unload` — free all GPUs
 ```bash
 curl -s localhost:8000/unload      # -> {"unloaded":true,"upstream_status":200}
 ```
-Releases VRAM **and** Flash-Next's ~34 GiB RAM/mmap tier (process dies → all tiers reclaimed). Idle (nothing
-resident, GPUs at 0) is the **normal** resting state, not an error.
+Evicts **every** loaded model, whoever loaded it — an operator action. Releases VRAM **and** Flash-Next's
+~34 GiB RAM/mmap tier (process dies → all tiers reclaimed). Idle (nothing resident, GPUs at 0) is the
+**normal** resting state, not an error.
 
 ### `GET /healthz` — liveness + what's loaded
 ```json
