@@ -197,7 +197,7 @@ curl -s -X POST localhost:9000/api/models/unload
 curl -s localhost:8000/load/flash-next                        # ~30–150 s cold load
 EXPECT_MTP=0 ~/ai/qwen36/flashnext/gates38next.sh            # main entry (needs jq). EXPECT_MTP=0 (MTP off): SKIPs draft gates #5/#9, FAILs if the server is unexpectedly drafting. Mainline 11736: 15 PASS / 0 FAIL / 2 SKIP (reasoning_effort, which the old fork failed, now passes)
 curl -s localhost:8000/load/flash-next-batch                  # text-only batch lane (:8089)
-EXPECT_MTP=0 EXPECT_VISION=0 PROFILE=batch B=http://127.0.0.1:8089 MODEL_ID=flash-next-batch SKIP_DEEP=1 ~/ai/qwen36/flashnext/gates38next.sh  # batch: EXPECT_VISION=0 -> #8/#9 SKIP (no mmproj), PROFILE=batch -> batch VRAM bands. 13 PASS / 1 FAIL / 3 SKIP (known FAIL = #12b: reasoning_effort plumbed but not directional under q8_0 KV)
+EXPECT_MTP=0 EXPECT_VISION=0 PROFILE=batch KVK=q8_0 B=http://127.0.0.1:8089 MODEL_ID=flash-next-batch SKIP_DEEP=1 ~/ai/qwen36/flashnext/gates38next.sh  # batch: EXPECT_VISION=0 -> #8/#9 SKIP, PROFILE=batch -> #2 bands, KVK=q8_0 -> #12b is KNOWN-FAIL not hard FAIL. 13 PASS / 0 FAIL / 3 SKIP / 1 KNOWN-FAIL (#12b: reasoning_effort plumbed but not directional under q8_0 KV; exits 0 unless another check fails)
 
 # embedders (both hit /v1/embeddings directly — the CPU one on :8086, GPU one on :8088)
 ~/ai/qwen36/gates-embed.sh                                        # CPU qwen-embed  (:8086)

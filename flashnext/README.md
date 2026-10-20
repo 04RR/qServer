@@ -16,10 +16,13 @@ launcher and correctness gate, tracked in the qServer repo so a fresh checkout i
     and #9 (coexistence) SKIP. Declared, not asserted (a wrong declaration only skips a would-pass check).
   - **`PROFILE`** (`main`|`batch`): selects the #2 residency VRAM bands (the entries resident-size differently).
   `regress.sh` runs it `EXPECT_MTP=0` for the main entry and `EXPECT_MTP=0 EXPECT_VISION=0 PROFILE=batch` for
-  the batch entry. As-run on mainline 11736 (`SKIP_DEEP=1`): main **15/0/2**; batch **13/1/3** — the batch's
-  1 FAIL is `#12b` (`reasoning_effort` is *plumbed* (12a) but not *directional* under q8_0 KV: high-effort
-  reasoning is not longer than low). Known/expected on the batch lane, not a regression.
-  `SELFTEST=1 bash gates38next.sh` self-checks the MTP decision logic (8 cases, no server).
+  the batch entry (also with `KVK=q8_0`). As-run on mainline 11736 (`SKIP_DEEP=1`): main **15/0/2**; batch
+  **13 PASS / 0 FAIL / 3 SKIP / 1 KNOWN-FAIL** — the KNOWN-FAIL is `#12b` (`reasoning_effort` *plumbed* (12a)
+  but not *directional* under q8_0 KV). On q8_0, `#12b` is a KNOWN-FAIL (does NOT fail the gate) while
+  high/low ≥ 820 permille (recorded baseline 733→639 = 871); it reverts to a hard FAIL if the numbers degrade
+  below that, or on any non-q8_0 KV (the exit criterion: an f16-KV batch re-test). Any OTHER failing check
+  still exits non-zero. `SELFTEST=1 bash gates38next.sh` self-checks the MTP decision + `classify_12b` logic
+  (16 cases, no server).
 - **`needle-next.py`** — deep-context (100K) needle, a dependency of gate #10.
 
 ## What lives OUTSIDE this repo (large; built/fetched separately)

@@ -36,6 +36,12 @@ swap in — batch its work, don't interleave it turn-by-turn**) · `qwen-38-27b`
 http URL) — images and video. `qwen-35b` is text-only. See "Vision requests" below.
 
 All: **131072 context**, thinking on. The 27B/35B use **MTP speculative decoding** + **q8_0 KV** (locked).
+
+**Sampling defaults** match each model's Qwen card: 27B & Flash-Next(+batch) run temp 1.0 / top_p 0.95 /
+top_k 20 / min_p 0 (the 3.8 thinking profile). **`qwen-35b`/`-batch` run temp 0.6** — deliberately the
+Qwen3.6 card's *"precise coding"* thinking profile (its *general* thinking profile is temp 1.0 **with**
+presence_penalty 1.5 together), not a mis-set against the 3.8 temp-1.0 card.
+
 **Flash-Next runs MTP OFF** (its decode is CPU-compute-bound — speculation ~triples CPU expert work for
 no net gain; dropping it frees ~4 GiB on GPU1 for `-ub 3072`) and **f16 KV** (q8_0 asserts on its QSA
 path). It uses the mainline llama.cpp build, `-t 16`, and `-ctxcp 8` context checkpoints.

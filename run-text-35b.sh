@@ -61,6 +61,9 @@ SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
 # -ts 1,0 : split-mode layer with 100% weight on GPU0. This keeps BOTH CUDA backends initialized
 # (so the -ot CUDA1 target resolves) while leaving default placement entirely on the 4090.
 # `-sm none` would risk never creating the CUDA1 backend at all.
+# SAMPLING: --temp 0.6 below is deliberate — the Qwen3.6 card's "precise coding" thinking profile. (The
+# 3.6 "general" thinking profile is temp 1.0 WITH presence_penalty 1.5 together; don't change temp alone.)
+# This is NOT a mis-set against the 3.8/Flash-Next card (that line's thinking temp is 1.0).
 exec env CUDA_VISIBLE_DEVICES="$GPU_BOTH" "$BIN" \
   -m "$MODEL" --alias qwen36-35b \
   -ngl "$NGL" -c "$CTX" -fa on -np "$NP" \
