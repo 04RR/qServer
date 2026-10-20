@@ -136,7 +136,7 @@ is resident whenever the 27B is loaded — no separate model or endpoint.
 | qwen-38-27b **UD-Q6_K_M** (`4,1`/n5, +vision) | ~69 | ~57 | ~37 | ~26 |
 | qwen-38-27b **plain Q6_K** (`3,1`/n4, +vision) | ~77 | ~50 | ~48 | — |
 | qwen-35b | ~206 | — | — | — |
-| qwen-38-flash-next (MTP off, f16, `-ub 3072`, `-t 16`) | ~17–18 | — | ~18 (≈flat) | — |
+| qwen-38-flash-next (MTP off, f16, `-ub 3072`, `-t 16`) | ~17–18 | — | ~16.5–18 (≈flat) | — |
 
 Two 27B quant profiles (toggle via `swap/config.yaml.q6km` / `.plain`): **UD-Q6_K_M** is imatrix
 (quality) but ~8–10% slower — intrinsic to the mixed-bit-width dequant, *not* a split artifact (re-tuning

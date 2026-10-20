@@ -132,7 +132,9 @@ models:
   # though single-token latency doesn't. For bulk indexing/scoring, not interactive chat. -c is TOTAL ctx
   # / slots -> 32768 per slot at NP=4. Same exclusive group; ~150 s cold swap-in. NCM=28 TS=37,11: rebalanced
   # toward GPU1 (MTP-off freed ~4 GiB there) — GPU0 keeps ~9 expert layers, GPU1 takes 11 (was 8) => +3 off CPU.
-  # Verified GPU0 20724/GPU1 15094 (1.2 free); +17% aggregate throughput @8-concurrent vs NCM=31,40/8. (NCM<31 at
+  # Verified (mainline build, as shipped 2026-10-20): GPU0 18906 (5.6 GiB free) / GPU1 15568 (~740 MiB free — GPU1 is
+  # the tight GPU; GPU0 has headroom, so a round-3 retune could shift more onto GPU0); +17% aggregate throughput
+  # @8-concurrent vs NCM=31,40/8. (NCM<31 at
   # TS=40,8 OOMs GPU0 — the freed VRAM is on GPU1, reached only by lowering the split; NCM=26 here would be tighter.)
   "qwen-38-flash-next-batch":
     name: "Qwen3.8-Flash-Next — batch (4 slots x 32k, MTP off, text-only)"

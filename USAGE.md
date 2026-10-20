@@ -194,8 +194,10 @@ curl -s -X POST localhost:9000/api/models/unload
 ~/ai/qwen36/gates35.sh ; kill %1
 
 # flash-next (125B, MAINLINE binary at ~/ai/flashnext-main; old fork ~/ai/flashnext kept for rollback):
-curl -s localhost:8000/load/flash-next                        # ~150 s cold load
-EXPECT_MTP=0 ~/ai/qwen36/flashnext/gates38next.sh            # single-server gates (needs jq). EXPECT_MTP=0 (MTP off): SKIPs the draft gates #5/#9, FAILs if the server is unexpectedly drafting. On mainline build 11736: 15 PASS / 0 FAIL / 2 SKIP (reasoning_effort, which the old fork failed, now passes)
+curl -s localhost:8000/load/flash-next                        # ~30–150 s cold load
+EXPECT_MTP=0 ~/ai/qwen36/flashnext/gates38next.sh            # main entry (needs jq). EXPECT_MTP=0 (MTP off): SKIPs draft gates #5/#9, FAILs if the server is unexpectedly drafting. Mainline 11736: 15 PASS / 0 FAIL / 2 SKIP (reasoning_effort, which the old fork failed, now passes)
+curl -s localhost:8000/load/flash-next-batch                  # text-only batch lane (:8089)
+EXPECT_MTP=0 EXPECT_VISION=0 PROFILE=batch B=http://127.0.0.1:8089 MODEL_ID=flash-next-batch SKIP_DEEP=1 ~/ai/qwen36/flashnext/gates38next.sh  # batch: EXPECT_VISION=0 -> #8/#9 SKIP (no mmproj), PROFILE=batch -> batch VRAM bands. 13 PASS / 0 FAIL / 3 SKIP
 
 # embedders (both hit /v1/embeddings directly — the CPU one on :8086, GPU one on :8088)
 ~/ai/qwen36/gates-embed.sh                                        # CPU qwen-embed  (:8086)
@@ -205,8 +207,9 @@ M=qwen-embed-gpu ~/ai/qwen36/gates-embed.sh http://127.0.0.1:8088 ; kill %1
 `regress.sh [0]` asserts **every registered model has a live gate**, in both directions — add a
 model without a `GATE_FOR` entry and it fails immediately. The stack currently registers **7 models**
 (`qwen-38-27b`, `qwen-35b`, `qwen-35b-batch`, `qwen-38-flash-next`, `qwen-38-flash-next-batch`,
-`qwen-embed`, `qwen-embed-gpu`), each mapped (the two flash-next entries map to `gates38next.sh` with
-`EXPECT_MTP=0`).
+`qwen-embed`, `qwen-embed-gpu`), each mapped. Both flash-next entries map to `gates38next.sh`: the main
+entry with `EXPECT_MTP=0`, the batch entry with `EXPECT_MTP=0 EXPECT_VISION=0 PROFILE=batch` (text-only,
+batch VRAM bands).
 
 ---
 
