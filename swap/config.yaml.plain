@@ -104,7 +104,8 @@ models:
       - "qwen3-embed-gpu"
 
   # QWEN3.8-FLASH-NEXT — qwen4exp 125B-A6B multimodal MoE + 51.2B-elem PLE.
-  # MAINLINE binary at ~/ai/flashnext-main/llama.cpp (build 11736, self-contained MTP head) — NOT this
+  # Launcher IN-REPO: flashnext/run-38-flash-next-main.sh (tracked here for reproducibility); its BIN ->
+  # the MAINLINE build at ~/ai/flashnext-main/llama.cpp (build 11736, self-contained MTP head) — NOT this
   # stack's llama.cpp, and NOT the old fork (~/ai/flashnext, kept for rollback). PLE (per_layer_token_embd,
   # 27.5 GiB IQ4_NL) is lazy-mmap on NVMe; routed experts split GPU/RAM via NCM=31; -ts 40,8 puts the
   # expert-heavy HIGH layers on the 4090 (NCM sends LOW layers' experts to CPU, and -sm layer would
@@ -119,7 +120,7 @@ models:
     description: "125B-A6B multimodal MoE; PLE lazy-mmap on NVMe. MTP OFF (CPU-compute-bound). f16 KV, NCM=31 TS=40,8, -ub 3072, -t 16, -ctxcp 8, 131072 ctx. ~17-18 t/s decode, ~820 t/s P-100K prefill."
     cmd: >-
       env SPEC_OFF=1 KVK=f16 KVV=f16 UB=3072 T=16 CKPT=8 NO_WARMUP=1 NCM=31 TS=40,8 MG=0 CTX=131072 VISION=on PORT=8085
-      /home/rohit/ai/flashnext-main/run-38-flash-next-main.sh
+      /home/rohit/ai/qwen36/flashnext/run-38-flash-next-main.sh
     proxy: http://127.0.0.1:8085
     checkEndpoint: /health
     ttl: 0
@@ -141,7 +142,7 @@ models:
     description: "Same 125B GGUF/placement as qwen-38-flash-next with -np 4, MTP off, vision off, q8_0 KV. Bulk throughput (indexing/scoring): amortizes the CPU expert reads across concurrent sequences; ~+20% aggregate @8-concurrent, ~640 t/s P-8K. -t 16 (same CPU-embed contention rule). Per-slot ctx 32768."
     cmd: >-
       env NP=4 SPEC_OFF=1 VISION=off KVK=q8_0 KVV=q8_0 UB=2048 T=16 CKPT=8 NO_WARMUP=1 NCM=28 TS=37,11 MG=0 CTX=131072 PORT=8089
-      /home/rohit/ai/flashnext-main/run-38-flash-next-main.sh
+      /home/rohit/ai/qwen36/flashnext/run-38-flash-next-main.sh
     proxy: http://127.0.0.1:8089
     checkEndpoint: /health
     ttl: 0

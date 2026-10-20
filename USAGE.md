@@ -195,7 +195,7 @@ curl -s -X POST localhost:9000/api/models/unload
 
 # flash-next (125B, MAINLINE binary at ~/ai/flashnext-main; old fork ~/ai/flashnext kept for rollback):
 curl -s localhost:8000/load/flash-next                        # ~150 s cold load
-EXPECT_MTP=0 ~/ai/flashnext/gates38next.sh                    # single-server gates (needs jq). EXPECT_MTP=0 (MTP off): SKIPs the draft gates #5/#9, FAILs if the server is unexpectedly drafting. Expect 14 PASS / 1 FAIL (reasoning_effort) / 2 SKIP
+EXPECT_MTP=0 ~/ai/qwen36/flashnext/gates38next.sh            # single-server gates (needs jq). EXPECT_MTP=0 (MTP off): SKIPs the draft gates #5/#9, FAILs if the server is unexpectedly drafting. On mainline build 11736: 15 PASS / 0 FAIL / 2 SKIP (reasoning_effort, which the old fork failed, now passes)
 
 # embedders (both hit /v1/embeddings directly — the CPU one on :8086, GPU one on :8088)
 ~/ai/qwen36/gates-embed.sh                                        # CPU qwen-embed  (:8086)
@@ -247,7 +247,7 @@ git checkout HEAD~1 -- config.yaml config.yaml.q6km config.yaml.plain   # restor
 #   batch: env NP=4 SPEC_OFF=1 VISION=off NO_WARMUP=1 NCM=28 TS=37,11 MG=0 CTX=131072 PORT=8089
 #          /home/rohit/ai/flashnext/run-38-flash-next.sh
 sudo systemctl restart qwen-swap qwen-router
-curl -s localhost:8000/load/flash-next && EXPECT_MTP=1 ~/ai/flashnext/gates38next.sh   # MTP-ON gate
+curl -s localhost:8000/load/flash-next && EXPECT_MTP=1 ~/ai/qwen36/flashnext/gates38next.sh   # MTP-ON gate
 ```
 The gate is `EXPECT_MTP`-aware: on the rolled-back (MTP-on) config run it with **`EXPECT_MTP=1`** — it
 then *requires* the server to be drafting and runs the draft gates instead of skipping them.
