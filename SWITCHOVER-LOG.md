@@ -86,3 +86,68 @@ sudo systemctl restart qwen-swap qwen-router
 The old fork tree (`~/ai/flashnext`, its build 10802, shared MTP head) is untouched → instant rollback.
 On the rolled-back (MTP-on) config, run the gate with **`EXPECT_MTP=1`** (the [M] check then requires the
 server to actually be drafting). Full recipe in `USAGE.md` → "Flash-Next rollback".
+
+---
+
+# Follow-ups (2026-10-20 pm)
+
+Six post-ship follow-ups. Gate changes + the sampling audit are done; the benchmark-heavy arms (3/4 and
+the arm-5 standalone leg) are **DEFERRED** after a host BSOD (below). **No restart needed for this delivery**
+(gate edits take effect when the gate is run; no config/launcher change was applied).
+
+## ⚠️ Host BSOD during benchmarking — arms 3/4/5-standalone paused
+A heavy standalone bench (arm-5-standalone: unload → immediately cold-launch the main server, mmap-faulting
+~29 GiB of expert/PLE weights from NVMe) **crashed the Windows host**: bugcheck **`0x133`
+DPC_WATCHDOG_VIOLATION**, with a `stornvme` **Event 11 (NVMe controller error)** at the crash. **Recurring** —
+the same crash hit yesterday 23:51 (identical params); both within 18 h, i.e. since heavy flash-next NVMe
+benchmarking began. No **WHEA** (not a CPU/RAM/PCIe hardware MCE) and no **GPU TDR** → a storage-driver DPC
+stall. The target drive is the **WD_BLACK SN850X** (E: = Disk 1), which hosts the WSL VHD + model store.
+- **Mechanism:** sustained high-rate random NVMe reads (expert/PLE page-ins), worst during the
+  unload→cold-refault burst, stall the NVMe controller/driver past the DPC watchdog.
+- **Recommended host fixes (admin):** update SN850X firmware (WD Dashboard) + NVMe/chipset/Intel drivers;
+  check SN850X temps under sustained read; optionally `!analyze -v` the dump (`C:\WINDOWS\Minidump\102026-*.dmp`)
+  with admin + WinDbg to name the exact driver. Production swaps (single steady loads) have been stable all
+  day; the crashes come from repeated cold launches / unload→refault bursts, which is what arms 3/4/5-standalone do.
+- **Deferred until the drive/driver is addressed:** arm-3 (batch decode A/B: T16/CKPT8, T16/CKPT0, T24/CKPT8,
+  T16/CKPT2), arm-4 (TS=38,10 on the arm-3 winner), arm-5 standalone leg. Driver + harness are written
+  (`scratchpad/arm3_batch_diag.py`, `arm5_standalone.sh`), ready to run once it's safe.
+
+## #1 Gate #12 reworked — directional, two-part (committed)
+Replaced the lenient "≥5% either direction" rule with: **12a** `/apply-template` must render different prompts
+for `reasoning_effort` low vs high (deterministic plumbing proof); **12b** mean `reasoning_content` length over
+3 prompts at temp 0 must be higher for high than low. Re-ran self-test (8/8) and the gate on both entries:
+- **main (f16): 15 PASS / 0 FAIL / 2 SKIP** — 12a PASS, 12b PASS (mean 754→1057, all 3 prompts longer).
+- **batch (q8_0): 13 PASS / 1 FAIL / 3 SKIP** — 12a PASS, **12b FAIL** (mean 733→639; high *shorter* on 2/3
+  prompts). `reasoning_effort` is plumbed but not directional under q8_0 KV. Reported, not loosened.
+
+## #2 Gate residency bands (main) recentred (committed)
+`PROFILE=main` bands → GPU0 **21500–24200**, GPU1 **13000–15500** (centred on as-shipped 23220 / 14196).
+
+## #5 Main decode gap (PARTIAL — standalone leg deferred)
+Production (embedder resident): code-short **16.13 t/s**, system-wide pgmajfault delta **12511** during the
+code cell, MemAvailable 43.8→42.8 GB. The standalone comparison (no embedder) is the arm that crashed the
+host, so the prod-vs-standalone fault delta is **not yet established**; CKPT=4-on-main is NOT tested. (Prior
+uncontrolled main run: 16.62 t/s, faults 24080 — fault counts vary run-to-run with page-cache warmth.)
+
+## #6 Sampling defaults audit (report only — nothing applied)
+`/props` (server actual) + GGUF `general.sampling.*` vs the Qwen card (thinking: temp 1.0, top_p 0.95,
+top_k 20, min_p 0):
+
+| entry | /props temp·top_k·top_p·min_p·pres | GGUF general.sampling | vs card |
+|---|---|---|---|
+| qwen-38-27b | 1.0 · 20 · 0.95 · 0 · 0 | temp 1.0, top_k 20, top_p 0.95 | **match** |
+| qwen-38-flash-next | 1.0 · 20 · 0.95 · 0 · 0 | temp 1.0, top_k 20, top_p 0.95 | **match** |
+| qwen-38-flash-next-batch | 1.0 · 20 · 0.95 · 0 · 0 | (same GGUF) | **match** |
+| qwen-35b | *launcher* `--temp 0.6` · 20 · 0.95 · 0 · 0 | temp **1.0**, top_k 20, top_p 0.95 | **temp mismatch** |
+| qwen-35b-batch | *launcher* `--temp 0.6` (same launcher) | (same GGUF) | **temp mismatch** |
+
+Only mismatch: **qwen-35b / qwen-35b-batch run `--temp 0.6`** (set in `run-text-35b.sh`), overriding both the
+card's 1.0 **and** the GGUF's `general.sampling.temp=1.0`. Note 0.6 is the older **Qwen3.6** generation's own
+thinking recommendation, so this may be deliberate; the 3.8/Flash-Next line is the temp-1.0 reference. **Fix if
+card-alignment is wanted (NOT applied):** change `--temp 0.6`→`--temp 1.0` in `~/ai/qwen36/run-text-35b.sh:74`,
+then `sudo systemctl restart qwen-swap`. (27B/flash-next entries confirmed via `/props`; 35B inferred from its
+launcher flag — on every confirmed entry `/props` == the launcher flag.)
+
+## Batch conc-8 reference (unchanged this session)
+Last-known shipped `-t 16` batch conc-8 = **23.6 t/s warm** (16.4 cold). The arm-3 A/B that would explain the
+gap vs old production (25.9–28.2) is deferred with the other heavy arms.

@@ -31,14 +31,14 @@ EXPECT_MTP="${EXPECT_MTP:-$([ "${SPEC_OFF:-0}" = "1" ] && echo 0 || echo 1)}"
 # check that would have passed — so we trust the declaration rather than probe for mmproj absence.
 EXPECT_VISION="${EXPECT_VISION:-$([ "${VISION:-on}" = "off" ] && echo 0 || echo 1)}"
 # Residency bands (#2) are PROFILE-specific. The two entries resident-size differently:
-#   main  (NCM=31, f16 KV, np=1, vision on): GPU0 ~22.0 / GPU1 ~14.2 GiB  [measured 2026-10-20]
-#   batch (NCM=28, q8_0 KV, np=4, text-only): GPU0 ~18.9 / GPU1 ~15.6 GiB [measured 2026-10-20]
+#   main  (NCM=31, f16 KV, np=1, vision on): GPU0 23220 / GPU1 14196 MiB  [measured as-shipped 2026-10-20]
+#   batch (NCM=28, q8_0 KV, np=4, text-only): GPU0 18906 / GPU1 15568 MiB [measured as-shipped 2026-10-20]
 # PROFILE=batch (set by regress.sh for the batch entry) selects the batch bands; default = main.
 PROFILE="${PROFILE:-$([ "${NP:-1}" -gt 1 ] 2>/dev/null && echo batch || echo main)}"
 if [ "$PROFILE" = "batch" ]; then
   G0_LO=16500; G0_HI=20500; G0_REF=18906; G1_LO=14200; G1_HI=16200; G1_REF=15568
 else
-  G0_LO=20000; G0_HI=23500; G0_REF=21876; G1_LO=13800; G1_HI=16000; G1_REF=15288
+  G0_LO=21500; G0_HI=24200; G0_REF=23220; G1_LO=13000; G1_HI=15500; G1_REF=14196
 fi
 skip=0; sk(){ echo "  SKIP: $1"; skip=$((skip+1)); }
 
@@ -237,21 +237,33 @@ else
   MODEL="$MODEL_ID" $PY "$HERE/needle-next.py" "$B" 100000 && ok "100K needle recalled" || no "100K needle NOT recalled"
 fi
 
-# ---- 12. Reasoning-effort switch: low vs high thinking length DIFFERS (temp 0, deterministic) ----
-# The testable property is that reasoning_effort HAS AN EFFECT per-request, not that high is strictly
-# longer: at temp 0 on ONE server the only difference between the two calls is the kwarg, so an IGNORED
-# kwarg gives byte-identical output (length diff 0) while an HONORED one changes it. We require both
-# non-empty and a >=5% relative length difference. (The old strict low<high falsely FAILed the q8_0-KV
-# batch entry, where high happened to render ~29% SHORTER though still clearly honored — direction isn't
-# guaranteed; magnitude of change is.) An ignored kwarg still FAILs (0% diff).
-echo "[12] reasoning_effort low vs high (temp 0)"
-Q="Prove that the square root of 2 is irrational, step by step."
-rl=$(chat "$Q" '{"max_tokens":4096,"temperature":0,"chat_template_kwargs":{"reasoning_effort":"low"}}' | jq -r '.choices[0].message.reasoning_content // "" | length')
-rh=$(chat "$Q" '{"max_tokens":4096,"temperature":0,"chat_template_kwargs":{"reasoning_effort":"high"}}' | jq -r '.choices[0].message.reasoning_content // "" | length')
-d=$(( rl>rh ? rl-rh : rh-rl )); mx=$(( rl>rh ? rl : rh ))
-echo "  reasoning chars: low=$rl high=$rh (|diff|=$d, $(( mx>0 ? d*100/mx : 0 ))%)"
-if [ "$rl" -gt 0 ] 2>/dev/null && [ "$rh" -gt 0 ] 2>/dev/null && [ $(( d*20 )) -ge "$mx" ] 2>/dev/null; then ok "reasoning_effort honored: low=$rl vs high=$rh differ $(( d*100/mx ))% (>=5%)"
-else no "reasoning_effort not honored per-request (low=$rl high=$rh, <5% diff) — may require server --chat-template-kwargs"; fi
+# ---- 12. reasoning_effort honored: (a) template render differs; (b) mean reasoning length high>low ----
+# Two independent assertions (no direction-agnostic loophole):
+#  12a DETERMINISTIC PLUMBING: /apply-template must render DIFFERENT prompts for reasoning_effort low vs
+#      high. This proves the kwarg reaches the chat template (no generation, no sampling noise).
+#  12b BEHAVIOURAL DIRECTION: mean reasoning_content length over 3 prompts at temp 0 must be HIGHER for
+#      high than for low. This is the real product property. It is NOT loosened to "either direction":
+#      if an entry (e.g. q8_0-KV batch) renders high SHORTER, that is a genuine FAIL to report, not hide.
+echo "[12] reasoning_effort (a) template render differs  (b) mean reasoning length high>low (3 prompts, temp 0)"
+_tmpl(){ curl -s -m30 "$B/apply-template" -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg s "$SYS" --arg e "$1" '{messages:[{role:"system",content:$s},{role:"user",content:"Hi"}],chat_template_kwargs:{reasoning_effort:$e}}')" \
+  | jq -r '.prompt // ""'; }
+tl=$(_tmpl low); th=$(_tmpl high)
+if [ -n "$tl" ] && [ "$tl" != "$th" ]; then ok "12a /apply-template render differs low vs high (kwarg reaches template)"
+else no "12a /apply-template render IDENTICAL (len low=${#tl} high=${#th}) — reasoning_effort not reaching the template"; fi
+QS=("Prove that the square root of 2 is irrational, step by step." \
+    "Explain, with the physics, why the daytime sky is blue." \
+    "Design an algorithm for the k-th largest element in an unsorted array and analyse its complexity.")
+sl=0; sh=0; n=0
+for q in "${QS[@]}"; do
+  a=$(chat "$q" '{"max_tokens":4096,"temperature":0,"chat_template_kwargs":{"reasoning_effort":"low"}}'  | jq -r '.choices[0].message.reasoning_content // "" | length')
+  b=$(chat "$q" '{"max_tokens":4096,"temperature":0,"chat_template_kwargs":{"reasoning_effort":"high"}}' | jq -r '.choices[0].message.reasoning_content // "" | length')
+  n=$((n+1)); sl=$((sl+a)); sh=$((sh+b)); echo "    prompt$n: low=$a high=$b"
+done
+ml=$((sl/n)); mh=$((sh/n))
+echo "  mean reasoning chars over $n prompts: low=$ml high=$mh"
+if [ "$mh" -gt "$ml" ] 2>/dev/null; then ok "12b mean reasoning high ($mh) > low ($ml)"
+else no "12b mean reasoning high ($mh) NOT > low ($ml) — reasoning_effort not honored directionally on this entry"; fi
 
 echo; echo "########## flash-next single-server gates: $pass PASS / $fail FAIL / $skip SKIP ##########"
 echo "(gates 6 MTP-identity, 11 f16-vs-q8_0, perplexity: run via m3-driver.sh)"
