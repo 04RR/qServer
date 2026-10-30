@@ -35,7 +35,7 @@ models:
   # onto it so existing clients keep working — they now land on 3.8, which supersedes the retired 3.6.
   "qwen-38-27b":
     name: "Qwen3.8-27B dense + vision (4090 + 5060 Ti)"
-    description: "Dense qwen3_5 27B Q6_K, native VLM (mmproj-F16), --split-mode layer -ts 3,1 across both GPUs, MTP n=4, 131072 ctx, q8_0 KV."
+    description: "Dense qwen3_5 27B UD-Q6_K_M (plain Q6_K pruned; served via the run-38-27b.sh default), native VLM (mmproj-F16), --split-mode layer -ts 3,1 across both GPUs, MTP n=4, 131072 ctx, q8_0 KV."
     cmd: /home/rohit/ai/qwen36/run-38-27b.sh
     proxy: http://127.0.0.1:8080      # script defaults --port 8080 (the primary-dense slot)
     checkEndpoint: /health

@@ -27,7 +27,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}
 
 ROOT=~/ai/qwen36
 BIN="$ROOT/llama.cpp/build/bin/llama-server"          # always absolute — never PATH-resolved
-MODEL="${MODEL:-$ROOT/models/Qwen3.8-27B-Q6_K.gguf}"  # unsloth/Qwen3.8-27B-GGUF, byte-verified; env-overridable
+MODEL="${MODEL:-$ROOT/models/Qwen38-27B-6_K_M/Qwen3.8-27B-UD-Q6_K_M.gguf}"  # UD-Q6_K_M (the plain Qwen3.8-27B-Q6_K.gguf was pruned to reclaim disk); env-overridable — the swap configs override MODEL anyway
 MMPROJ="${MMPROJ:-$ROOT/models/mmproj-Qwen3.8-F16.gguf}" # F16, NOT Q8_0 -> avoids Blackwell #24399 on the 5060 Ti
 
 # --- tunables (overridable via env) ---
