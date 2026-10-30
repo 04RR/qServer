@@ -61,6 +61,7 @@ declare -A GATE_FOR=(
   [qwen-embed-gpu]="gates-embed.sh"  # same model on the 4090 (on-demand heavy) — same shape/semantics gate
   [qwen-38-flash-next]="EXPECT_MTP=0 flashnext/gates38next.sh"  # qwen4exp 125B, MTP OFF (round 2); gate in-repo at $HERE/flashnext
   [qwen-38-flash-next-batch]="EXPECT_MTP=0 EXPECT_VISION=0 PROFILE=batch KVK=q8_0 flashnext/gates38next.sh"  # -np 4, MTP-off, TEXT-ONLY, q8_0 KV; EXPECT_VISION=0 -> #8/#9 SKIP; PROFILE=batch -> #2 bands; KVK=q8_0 -> #12b KNOWN-FAIL (not hard) while high/low>=820 permille (exit criterion: f16-KV batch re-test)
+  [qwen-38-27b-fast]="gates-27b-fast.sh"  # Qwen3.8-27B IQ3_S-mtp fast quant (4090-only, text-only, MTP n=3) — single-GPU-residency + MTP-live gate
 )
 # NB: this file (regress.sh) is the ROUTER-integration suite for the primary model; gates38.sh is its
 # mapped deep gate (analogous to gates35/gates122). Both are run; [0] only needs each model to map to one.

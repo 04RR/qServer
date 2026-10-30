@@ -150,6 +150,23 @@ models:
       - "flash-next-batch"
       - "qwen38-next-batch"
 
+  # Qwen3.8-27B — FAST quant: ISTA-DASLab GSQ-RCO IQ3_S-mtp (~3.5 bpw, 11.8 GiB, task-lossless: AIME25 100 /
+  # LCB-v6 85.71 == BF16). SAME base as qwen-38-27b (arch qwen35), runs on this build. TEXT-ONLY. The whole
+  # model FITS ON THE 4090 ALONE (run-38-27b-fast.sh exposes only the 4090: no split, ~18 of 24.5 GiB w/ MTP)
+  # => ~1.45x faster than the dual-GPU path at the same 131072 ctx. MTP n=3 (embedded nextn head) -> code
+  # ~124 / prose ~102 t/s (2.08x / 1.72x over off). Quality-first Q6_K qwen-38-27b stays; this is the FAST 27B.
+  "qwen-38-27b-fast":
+    name: "Qwen3.8-27B GSQ-RCO IQ3_S-mtp — fast (4090 only)"
+    description: "Qwen3.8-27B IQ3_S-mtp (GSQ-RCO ~3.5bpw, task-lossless), TEXT-ONLY, whole model on the 4090 (no split), q8_0 KV, 131072 ctx, MTP n=3 -> ~124 code / ~102 prose t/s. The fast 27B."
+    cmd: /home/rohit/ai/qwen36/run-38-27b-fast.sh
+    proxy: http://127.0.0.1:8084
+    checkEndpoint: /health
+    ttl: 0
+    aliases:
+      - "27b-fast"
+      - "qwen38-fast"
+      - "qwen-27b-iq3"
+
 routing:
   router:
     use: group
@@ -164,6 +181,7 @@ routing:
             - qwen-35b-batch        # -np 4 batch variant of the 35B (signalpost SCORE); same GGUF, :8083
             - qwen-38-flash-next    # qwen4exp 125B MoE+PLE+MTP; isolated binary (~/ai/flashnext), :8085
             - qwen-38-flash-next-batch  # same GGUF, -np 4 / MTP-off / text-only for bulk throughput, :8089
+            - qwen-38-27b-fast      # Qwen3.8-27B IQ3_S-mtp, whole model on the 4090 (no spill); :8084
             - qwen-embed-gpu        # on-demand GPU embedder; shares the 4090 exclusively with the chat models
         "embed-persistent":
           persistent: true    # stays loaded; NOT evicted when a chat model loads (CPU model, zero VRAM)
