@@ -4,7 +4,17 @@
 # ARCH: general.architecture = `qwen35` — the SAME tag our Qwen3.8-27B carries (verified from both GGUFs:
 #   33 blocks, GQA head_count 16 / kv 4, head_dim 256, full_attention_interval 4 = Qwen3.5 hybrid, mRoPE,
 #   native ctx 262144). So it runs on the EXISTING production build (657e011) that already serves the 27B
-#   on qwen35 — no rebuild. Dense => no MTP head in the GGUF => no speculative decode.
+#   on qwen35 — no rebuild.
+#
+# MTP: the GGUF ships an embedded next-token (nextn) head on the last block — blk.32.nextn.{eh_proj,enorm,
+#   hnorm,shared_head_norm} — the SAME self-speculation head the 27B/35B carry. So MTP works natively via
+#   `--spec-type draft-mtp` (no -md; the embedded head is used), vocab-matched by construction, ~zero extra
+#   VRAM. A 9B fully on the 4090 is memory-bandwidth-bound, the regime where MTP pays (verify N draft tokens
+#   per single weight-read) — unlike flash-next (CPU-compute-bound) where MTP was a net loss. MTP requires
+#   -np 1 (we use it). BENCHMARKED on this box (standalone, Q6_K, 4090-only, temp 0, 256 tok):
+#     off -> 95 t/s both; NMAX=3 -> code 169 t/s (~1.8x, acc 0.78) / prose 130 t/s (~1.37x, acc 0.49).
+#   NMAX=3 is the knee: 4-5 add a sliver of code speed but hurt prose (drafts wasted; acc decays to 0.34).
+#   Toggle with MTP=off; re-sweep SPEC_NMAX if the workload is code-only (4) vs prose-heavy (2).
 #
 # FASTEST-INFERENCE PLACEMENT (the #1 past learning): the whole model lives on the 4090 (GPU0) ALONE.
 #   At Q6_K (~7.6 GiB) + q8_0 KV (small: the hybrid keeps a KV cache only on the full-attention layers),
@@ -33,6 +43,13 @@ KV="${KV:-q8_0}"                    # LOCKED q8_0 (q4_0 silently guts long-range
 NGL="${NGL:-99}"                    # all layers on the single visible GPU (the 4090).
 PORT="${PORT:-8084}"                # backend port (8087 is the kr_web Docker container; 8080/82/83/85/86/88/89 taken).
 
+# MTP self-speculative decode via the embedded nextn head (default on). SPEC_NMAX = draft depth per step.
+# MTP=off => --spec-type none. Set from the NMAX sweep (draft_n>0 + acceptance + t/s vs off).
+MTP="${MTP:-on}"
+SPEC_NMAX="${SPEC_NMAX:-3}"
+SPEC_ARGS=(--spec-type draft-mtp --spec-draft-n-max "$SPEC_NMAX")
+[ "$MTP" = "off" ] && SPEC_ARGS=(--spec-type none)
+
 # SAMPLING: Ornith card's GENERAL thinking profile (temp 1.0 WITH presence_penalty 1.5 — they go together).
 #   For PRECISE CODING the card specifies temp 0.6 / presence_penalty 0.0 (same top_p/top_k/min_p); flip both
 #   via TEMP/PRES env, never temp alone. Thinking is forced ON at the router regardless (FORCE_THINKING).
@@ -43,6 +60,7 @@ exec env CUDA_VISIBLE_DEVICES="$GPU_4090" "$BIN" \
   -m "$MODEL" \
   --alias ornith \
   -ngl "$NGL" -c "$CTX" -fa on -np 1 \
+  "${SPEC_ARGS[@]}" \
   --cache-type-k "$KV" --cache-type-v "$KV" \
   --no-context-shift --ctx-checkpoints 32 \
   --jinja \
@@ -50,4 +68,4 @@ exec env CUDA_VISIBLE_DEVICES="$GPU_4090" "$BIN" \
   --temp "$TEMP" --top-p 0.95 --top-k 20 --min-p 0.0 \
   --presence-penalty "$PRES" --repeat-penalty 1.0 \
   --host 127.0.0.1 --port "$PORT"
-# NOTE: no --mmproj (vision off). No -sm/-ts/-ot (single GPU). No --spec-type (dense: no MTP head).
+# NOTE: no --mmproj (vision off). No -sm/-ts/-ot (single GPU). MTP via the embedded nextn head (SPEC_ARGS).

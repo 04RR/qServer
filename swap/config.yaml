@@ -163,11 +163,11 @@ models:
   # TEXT-ONLY (no mmproj downloaded). FASTEST-INFERENCE placement: the whole model on the 4090 ALONE —
   # run-ornith-9b.sh exposes only the 4090 (CUDA_VISIBLE_DEVICES=$GPU_4090), so -ngl 99 keeps every layer
   # on the fast card with NO tensor-split/spill to the 5060 Ti (the qwen35 hybrid keeps a KV cache only on
-  # full-attention layers, so Q6_K ~7.6 GiB + q8_0 KV fits 24.5 GiB with headroom). No MTP (dense, no draft
-  # head). gpu-exclusive member: one chat model resident at a time.
+  # full-attention layers, so Q6_K ~7.6 GiB + q8_0 KV fits 24.5 GiB with headroom). MTP n=3 via the embedded
+  # nextn head (~1.8x code / 1.37x prose; bandwidth-bound 9B = where MTP pays). gpu-exclusive member.
   "ornith-9b":
     name: "Ornith-1.5-9B (ornith-ai, qwen35 dense) — 4090 only"
-    description: "Dense 9B qwen35 reasoning/coding, Q6_K, TEXT-ONLY, whole model on the 4090 (no split/spill), q8_0 KV, 131072 ctx. The fast small model."
+    description: "Dense 9B qwen35 reasoning/coding, Q6_K, TEXT-ONLY, whole model on the 4090 (no split/spill), q8_0 KV, 131072 ctx, MTP n=3 (embedded nextn head, ~1.8x code / ~1.37x prose). The fast small model."
     cmd: /home/rohit/ai/qwen36/run-ornith-9b.sh
     proxy: http://127.0.0.1:8084
     checkEndpoint: /health

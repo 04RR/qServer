@@ -9,6 +9,7 @@
 #  - NO MTP: Ornith is dense with no draft head in the GGUF, so there is no draft_n gate (that's 35B-only).
 set -uo pipefail
 B="${B:-http://127.0.0.1:8084}"
+EXPECT_MTP="${EXPECT_MTP:-1}"   # 1 = assert MTP is drafting (default launcher). Set 0 for an MTP=off run.
 PY=python3
 command -v jq >/dev/null || { echo "need jq"; exit 1; }
 pass=0; fail=0
@@ -105,6 +106,29 @@ h2=$(curl -s -o /dev/null -w "%{http_code}" -m5 "$B/health")
 printf -v tpsr '%.1f' "$tps" 2>/dev/null || tpsr="$tps"
 [ "$errs" -eq 0 ] && [ "$h2" = "200" ] && ok "6/6 gens clean, server alive, decode ~${tpsr} t/s" \
   || no "$errs/6 errored (health=$h2)"
+
+# ---- 7. MTP live (embedded nextn head drafting): draft_n>0, acceptance>0, AL>1 ----
+# Ornith's GGUF ships a nextn/MTP head; the launcher runs --spec-type draft-mtp (NMAX=3). On a 4090-only
+# 9B (bandwidth-bound) MTP ~1.8x code / ~1.37x prose — so a draft_n of 0 means MTP silently stopped
+# drafting (regression), which this gate must catch. (Set EXPECT_MTP=0 to allow an MTP=off run.)
+echo "[7] MTP live (draft_n / acceptance)"
+t=$(curl -s -m 300 "$B/completion" -H 'Content-Type: application/json' \
+     -d '{"prompt":"Write a Python function that merges two sorted lists.\n\ndef merge(","n_predict":220,"temperature":0.2,"cache_prompt":false}' \
+   | jq -r '.timings | "\(.draft_n // 0) \(.draft_n_accepted // 0) \(.predicted_n // 0) \(.predicted_per_second // 0)"')
+echo "  draft_n draft_n_accepted predicted_n tg_tps = $t"
+if [ "$EXPECT_MTP" = "1" ]; then
+  echo "$t" | $PY -c '
+import sys
+dn,da,pn,tps=sys.stdin.read().split()
+dn,da,pn,tps=int(dn),int(da),int(pn),float(tps)
+if dn==0: print("MTP NOT DRAFTING (draft_n=0)"); sys.exit(1)
+acc=da/dn; al=pn/(pn-da) if pn>da else 99
+print(f"acceptance={acc:.3f} AL={al:.2f} tg={tps:.1f} t/s")
+sys.exit(0 if (acc>0 and al>1.0) else 1)' && ok "MTP contributing" || no "MTP not contributing (expected draft-mtp live)"
+else
+  sk_dn=$(echo "$t" | awk '{print $1}')
+  [ "$sk_dn" = "0" ] && ok "MTP off as expected (draft_n=0)" || no "EXPECT_MTP=0 but draft_n=$sk_dn (MTP still on?)"
+fi
 
 echo; echo "########## Ornith gates: $pass PASS / $fail FAIL ##########"
 [ "$fail" -eq 0 ] || exit 1
